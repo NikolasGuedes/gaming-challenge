@@ -1,14 +1,20 @@
 import { Module } from "@nestjs/common";
+import { SQS_CLIENT, createSqsClient } from "./infrastructure/sqs/sqs-client.provider.js";
 import { OUTBOX_REPOSITORY } from "./application/ports/outbox.repository.js";
+import { INBOX_REPOSITORY } from "./application/ports/inbox.repository.js";
 import { MikroOrmOutboxRepository } from "./infrastructure/persistence/repositories/outbox.repository.js";
+import { MikroOrmInboxRepository } from "./infrastructure/persistence/repositories/inbox.repository.js";
+import { WagerTransactionConsumer } from "./infrastructure/sqs/wager-transaction.consumer.js";
+import { OutboxPublisherWorker } from "./infrastructure/sqs/outbox-publisher.worker.js";
 
-// Minimal stub (Task 12): provides just enough for WageringModule to compile and
-// for ProcessWagerUseCase (which depends on OUTBOX_REPOSITORY) to run. Task 16
-// overwrites this file with the full version — SQS_CLIENT, INBOX_REPOSITORY, the
-// SQS consumer, and the outbox publisher worker — as an additive superset of
-// this stub, not a conflicting rewrite.
 @Module({
-  providers: [{ provide: OUTBOX_REPOSITORY, useClass: MikroOrmOutboxRepository }],
-  exports: [OUTBOX_REPOSITORY],
+  providers: [
+    { provide: SQS_CLIENT, useFactory: createSqsClient },
+    { provide: OUTBOX_REPOSITORY, useClass: MikroOrmOutboxRepository },
+    { provide: INBOX_REPOSITORY, useClass: MikroOrmInboxRepository },
+    WagerTransactionConsumer,
+    OutboxPublisherWorker,
+  ],
+  exports: [OUTBOX_REPOSITORY, SQS_CLIENT],
 })
 export class MessagingModule {}

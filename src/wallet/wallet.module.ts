@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { CreateWalletUseCase } from "./application/use-cases/create-wallet.use-case.js";
+import { ReconcileWalletUseCase } from "./application/use-cases/reconcile-wallet.use-case.js";
 import { WALLET_REPOSITORY } from "./application/ports/wallet.repository.js";
 import { MikroOrmWalletRepository } from "./infrastructure/persistence/repositories/wallet.repository.js";
 import { WalletController } from "./infrastructure/http/wallet.controller.js";
@@ -10,6 +11,7 @@ import { MikroOrmWagerTransactionRepository } from "../wagering/infrastructure/p
   controllers: [WalletController],
   providers: [
     CreateWalletUseCase,
+    ReconcileWalletUseCase,
     { provide: WALLET_REPOSITORY, useClass: MikroOrmWalletRepository },
     // CreateWalletUseCase persists the internal OPENING WagerTransaction, so this
     // module needs its own binding for this token — NestJS providers are

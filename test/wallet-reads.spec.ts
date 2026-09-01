@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Money } from "../src/shared-kernel/money.js";
 import { CreateWalletUseCase } from "../src/wallet/application/use-cases/create-wallet.use-case.js";
+import { ReconcileWalletUseCase } from "../src/wallet/application/use-cases/reconcile-wallet.use-case.js";
 import { MikroOrmWalletRepository } from "../src/wallet/infrastructure/persistence/repositories/wallet.repository.js";
 import { MikroOrmWagerTransactionRepository } from "../src/wagering/infrastructure/persistence/repositories/wager-transaction.repository.js";
 import { WalletController } from "../src/wallet/infrastructure/http/wallet.controller.js";
@@ -28,7 +29,8 @@ describe("WalletController — reads", () => {
     });
 
     const readEm = db.orm.em.fork();
-    const controller = new WalletController(createUseCase, new MikroOrmWalletRepository(readEm));
+    const readRepo = new MikroOrmWalletRepository(readEm);
+    const controller = new WalletController(createUseCase, new ReconcileWalletUseCase(readRepo), readRepo);
     const response = await controller.getWallet(wallet.id);
     expect(response.balance).toEqual({ amount: "50.00", currency: "BRL" });
   });
@@ -44,7 +46,8 @@ describe("WalletController — reads", () => {
     });
 
     const readEm = db.orm.em.fork();
-    const controller = new WalletController(createUseCase, new MikroOrmWalletRepository(readEm));
+    const readRepo = new MikroOrmWalletRepository(readEm);
+    const controller = new WalletController(createUseCase, new ReconcileWalletUseCase(readRepo), readRepo);
     const ledger = await controller.getLedger(wallet.id);
     expect(ledger.entries).toHaveLength(1);
     expect(ledger.entries[0].direction).toBe("CREDIT");

@@ -1,5 +1,5 @@
 import { ConflictException, Inject, Injectable } from "@nestjs/common";
-import type { EntityManager } from "@mikro-orm/postgresql";
+import { EntityManager } from "@mikro-orm/postgresql";
 import { computePayloadHash } from "../../domain/payload-hash.js";
 import {
   IDEMPOTENCY_KEY_REPOSITORY,

@@ -6,6 +6,10 @@ export default defineConfig({
   entities: ['dist/**/*.entity.js'],
   entitiesTs: ['src/**/*.entity.ts'],
   migrations: {
+    // NOTE: rootDir is "." (see tsconfig.build.json), so compiled output
+    // nests under dist/src/**. Once Task 5+ adds src/migrations/*.ts, the
+    // compiled files will land at dist/src/migrations, not dist/migrations,
+    // and this path must become "dist/src/migrations" to match.
     path: 'dist/migrations',
     pathTs: 'src/migrations',
   },

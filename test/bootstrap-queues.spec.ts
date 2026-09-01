@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { LocalstackContainer, StartedLocalStackContainer } from "@testcontainers/localstack";
 import { GetQueueAttributesCommand, SQSClient } from "@aws-sdk/client-sqs";
-import { bootstrapQueues } from "../src/messaging/infrastructure/sqs/bootstrap-queues";
+import { bootstrapQueues } from "../src/messaging/infrastructure/sqs/bootstrap-queues.js";
 
 describe("bootstrapQueues", () => {
   let container: StartedLocalStackContainer;

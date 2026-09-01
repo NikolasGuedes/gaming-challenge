@@ -3,7 +3,7 @@ import {
   GetQueueAttributesCommand,
   SQSClient,
 } from "@aws-sdk/client-sqs";
-import { createSqsClient } from "./sqs-client.provider";
+import { createSqsClient } from "./sqs-client.provider.js";
 
 export async function bootstrapQueues(
   client: SQSClient,

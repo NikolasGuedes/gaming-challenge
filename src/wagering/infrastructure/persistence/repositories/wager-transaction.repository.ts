@@ -38,4 +38,14 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     });
     return entities.map(WagerTransactionMapper.toDomain);
   }
+
+  async findProcessedReversalFor(providerId: string, externalTransactionId: string): Promise<WagerTransaction | null> {
+    const entity = await this.em.findOne(WagerTransactionEntity, {
+      providerId,
+      referenceExternalTransactionId: externalTransactionId,
+      kind: { $in: ["REFUND", "ROLLBACK"] },
+      status: "PROCESSED",
+    });
+    return entity ? WagerTransactionMapper.toDomain(entity) : null;
+  }
 }

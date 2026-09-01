@@ -147,4 +147,55 @@ describe("ProcessWagerUseCase", () => {
     const wallet = await new MikroOrmWalletRepository(verifyEm).findById(walletId);
     expect(wallet?.balance.toString()).toBe("100.00");
   });
+
+  it("rejects a second REFUND referencing an already-reversed BET with REFERENCE_ALREADY_REVERSED", async () => {
+    const walletId = await seedWallet(db, "player-refund-2", "100.00");
+
+    const betResult = await buildProcessWagerUseCase(db.orm.em.fork({ useContext: true })).execute({
+      externalTransactionId: "bet-double-refund",
+      providerId: "provider-a",
+      idempotencyKey: "idem-bet-double-refund",
+      payloadHash: "hash-bet-double-refund",
+      kind: "BET",
+      walletId,
+      amount: Money.from({ amount: "30.00", currency: "BRL" }),
+      referenceExternalTransactionId: null,
+    });
+    expect(betResult).toMatchObject({ status: "PROCESSED" });
+
+    const firstRefund = await buildProcessWagerUseCase(db.orm.em.fork({ useContext: true })).execute({
+      externalTransactionId: "refund-first",
+      providerId: "provider-a",
+      idempotencyKey: "idem-refund-first",
+      payloadHash: "hash-refund-first",
+      kind: "REFUND",
+      walletId,
+      amount: Money.from({ amount: "30.00", currency: "BRL" }),
+      referenceExternalTransactionId: "bet-double-refund",
+    });
+    expect(firstRefund).toMatchObject({ status: "PROCESSED" });
+
+    const secondRefund = await buildProcessWagerUseCase(db.orm.em.fork({ useContext: true })).execute({
+      externalTransactionId: "refund-second",
+      providerId: "provider-a",
+      idempotencyKey: "idem-refund-second",
+      payloadHash: "hash-refund-second",
+      kind: "REFUND",
+      walletId,
+      amount: Money.from({ amount: "30.00", currency: "BRL" }),
+      referenceExternalTransactionId: "bet-double-refund",
+    });
+    expect(secondRefund).toEqual({
+      status: "REJECTED",
+      transactionId: expect.any(String),
+      failureCode: FailureCode.REFERENCE_ALREADY_REVERSED,
+      idempotentReplay: false,
+    });
+
+    const verifyEm = db.orm.em.fork();
+    const wallet = await new MikroOrmWalletRepository(verifyEm).findById(walletId);
+    // BET debited 30 (100 -> 70), only the first REFUND credited 30 back (70 -> 100); the
+    // second REFUND must not have touched the balance a second time.
+    expect(wallet?.balance.toString()).toBe("100.00");
+  });
 });

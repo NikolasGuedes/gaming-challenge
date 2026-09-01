@@ -7,6 +7,8 @@ export interface WagerTransactionRepository {
   save(tx: WagerTransaction): Promise<void>;
   /** PENDING_REFERENCE rows whose reference points at (providerId, externalTransactionId). */
   findPendingReferencesFor(providerId: string, externalTransactionId: string): Promise<WagerTransaction[]>;
+  /** An already-PROCESSED REFUND/ROLLBACK whose reference points at (providerId, externalTransactionId), if any. */
+  findProcessedReversalFor(providerId: string, externalTransactionId: string): Promise<WagerTransaction | null>;
 }
 
 export const WAGER_TRANSACTION_REPOSITORY = Symbol("WAGER_TRANSACTION_REPOSITORY");

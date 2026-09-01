@@ -108,6 +108,24 @@ export class ProcessWagerUseCase {
         await this.wagerTransactionRepository.save(tx);
         return { status: "REJECTED", transactionId: tx.id, failureCode: invalidRefCode, idempotentReplay: false };
       }
+
+      // Guard against two distinct REFUND/ROLLBACK submissions (different externalTransactionId)
+      // both reversing the same referenced transaction — without this, both would pass the checks
+      // above and both would credit the wallet, a real double-credit.
+      const existingReversal = await this.wagerTransactionRepository.findProcessedReversalFor(
+        input.providerId,
+        input.referenceExternalTransactionId,
+      );
+      if (existingReversal) {
+        const tx = this.newTransaction(input).markRejected(FailureCode.REFERENCE_ALREADY_REVERSED);
+        await this.wagerTransactionRepository.save(tx);
+        return {
+          status: "REJECTED",
+          transactionId: tx.id,
+          failureCode: FailureCode.REFERENCE_ALREADY_REVERSED,
+          idempotentReplay: false,
+        };
+      }
     }
 
     let wallet = await this.walletRepository.findByIdForUpdate(input.walletId);

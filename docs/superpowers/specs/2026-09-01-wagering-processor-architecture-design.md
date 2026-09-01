@@ -3,6 +3,18 @@
 Status: approved (pré-implementação)
 Data: 2026-09-01
 
+## 0. Princípio orientador
+
+Este projeto **não busca maximizar os 100 pontos da avaliação**. Prioridade:
+(1) blindar os requisitos eliminatórios — Money nunca `number`/`float`, sem
+saldo negativo por race, sem débito/crédito duplicado, idempotência
+persistente, correto com 3+ instâncias, ledger auditável, testes de
+integração com Postgres/SQS reais; (2) manter todo o resto (observabilidade,
+testes, mensageria) simples e objetivo, evitando mecanismos sofisticados que
+seriam difíceis de explicar/defender numa apresentação; (3) autoria
+implementa apenas o que consegue justificar tecnicamente ao vivo. Teste de
+carga (diferencial opcional) fica fora de escopo.
+
 ## 1. Contexto e stack
 
 Desafio Jungle Gaming: serviço financeiro distribuído que processa apostas de
@@ -75,9 +87,13 @@ Localização: `src/wagering/domain/`.
     `PendingReference`).
   - Reversão (`REFUND`/`ROLLBACK`) cuja transação referenciada ainda não
     existe (ou não está `Processed`) fica `PendingReference` — **não é
-    rejeitada**. Um worker agendado (`@Interval`, backoff exponencial)
-    reprocessa transações `PendingReference` até resolver a referência ou
-    esgotar um limite de tentativas configurável e documentado.
+    rejeitada**. Resolução simples e síncrona (sem worker/cron separado):
+    quando a transação referenciada é gravada como `Processed`, a mesma
+    transação SQL verifica se existe alguma `WagerTransaction` em
+    `PendingReference` apontando pra ela e a processa ali mesmo. Se nunca
+    chegar a referência, a reversão fica `PendingReference` indefinidamente
+    — aceitável pro escopo deste projeto (documentar a limitação em
+    `ARCHITECTURE.md` em vez de construir um mecanismo de expiração).
   - Reversões geram lançamento inverso no ledger; nunca editam o lançamento
     original.
 
@@ -150,7 +166,8 @@ documentada — o enunciado não prescreve o valor, mas `walletId` é a unidade
 de concorrência da seção 8, então agrupar por wallet preserva ordem onde
 importa; a garantia final de correção vem do inbox, não da ordem do broker).
 Marca `publishedAt` só após confirmação de entrega. Falha → incrementa
-`attempts`/`nextAttemptAt` com backoff exponencial.
+`attempts` e adia `nextAttemptAt` por um intervalo fixo (backoff simples, sem
+curva exponencial sofisticada — fácil de explicar e suficiente pro escopo).
 
 ## 6. Consumer (SQS → inbox)
 
@@ -194,36 +211,39 @@ financeira, concorrência e idempotência — que valem pontos na avaliação.
 
 ## 9. Módulos NestJS
 
-Cada módulo com `domain/`, `application/` (use cases), `infrastructure/`
-(repositórios MikroORM, adapter SQS), `shared/` (utilitários comuns):
+4 módulos, sem camadas extras que não agregam pra explicar/defender. Cada um
+com `domain/`, `application/`, `infrastructure/`:
 
 - `WalletModule` — wallet, ledger, reconciliação.
 - `WageringModule` — `WagerTransaction`, regras BET/WIN/LOSS/REFUND/ROLLBACK,
-  worker de `PendingReference`.
-- `OutboxModule` — publisher.
-- `InboxModule` — consumer SQS.
+  resolução síncrona de `PendingReference`.
+- `MessagingModule` — inbox (consumer SQS) e outbox (publisher) juntos, são
+  as duas faces do mesmo mecanismo de entrega confiável.
 - `HealthModule` — liveness/readiness.
 
 ## 10. Observabilidade
 
-Logs estruturados (JSON) com `correlationId`, `messageId`, `transactionId`,
-`walletId`, `providerId` — sem dados sensíveis. Métricas: contagem de
-transações por status, taxa de duplicata detectada, contagem de retry,
-profundidade da DLQ, conflitos de lock, lag de publicação do outbox,
-percentis de latência.
+Só o essencial: logs estruturados (JSON) com `correlationId`, `messageId`,
+`transactionId`, `walletId`, `providerId` — sem dados sensíveis. Sem stack
+de métricas (Prometheus/Grafana). Contagem de transações por status,
+profundidade da DLQ e lag de publicação do outbox ficam disponíveis via
+queries SQL simples (documentadas em `ARCHITECTURE.md`), não painel.
 
 ## 11. Testes (estratégia, não escopo desta spec)
+
+Cobre só os cenários que o desafio exige — não persegue cobertura extra.
 
 - Unit (bun test): `Money`, regras de `kind`, conflito de moeda, idempotency
   key com payload divergente.
 - Integração (Testcontainers Postgres + LocalStack reais): migrations,
-  atomicidade wallet/ledger/inbox/outbox, redelivery, publishers
-  concorrentes, retry/DLQ, recuperação após reinício.
+  atomicidade wallet/ledger/inbox/outbox, redelivery, retry/DLQ, recuperação
+  após reinício.
 - Concorrência (paralelismo real): cenário da seção 8, mesma aposta 50x em
   paralelo, ≥3 instâncias simultâneas, worker morto após commit e antes do
   ack, dois publishers sobre a mesma outbox, reversão antes da referência.
 - Invariante final verificada em todo teste: `wallet.balance == saldo
   reconstruído pelo ledger`.
+- Sem teste de carga (diferencial opcional, fora de escopo).
 
 ## Fora de escopo desta spec
 

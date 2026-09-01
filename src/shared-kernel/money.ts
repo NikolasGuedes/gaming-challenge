@@ -1,5 +1,5 @@
 import { Decimal } from "decimal.js";
-import { CurrencyMismatchError, InvalidMoneyError } from "./money.errors";
+import { CurrencyMismatchError, InvalidMoneyError } from "./money.errors.js";
 
 const DECIMAL_STRING_PATTERN = /^-?\d+(\.\d{1,2})?$/;
 

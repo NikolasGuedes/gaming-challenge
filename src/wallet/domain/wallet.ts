@@ -1,6 +1,6 @@
-import { Money } from "../../shared-kernel/money";
-import { FailureCode } from "../../shared-kernel/failure-code";
-import { WalletLedgerEntry } from "./wallet-ledger-entry";
+import { Money } from "../../shared-kernel/money.js";
+import { FailureCode } from "../../shared-kernel/failure-code.js";
+import { WalletLedgerEntry } from "./wallet-ledger-entry.js";
 
 export type WalletApplyResult =
   | { status: "PROCESSED"; wallet: Wallet; entry: WalletLedgerEntry }

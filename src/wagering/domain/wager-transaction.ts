@@ -1,5 +1,5 @@
-import { Money } from "../../shared-kernel/money";
-import { FailureCode } from "../../shared-kernel/failure-code";
+import { Money } from "../../shared-kernel/money.js";
+import { FailureCode } from "../../shared-kernel/failure-code.js";
 
 export type WagerKind = "BET" | "WIN" | "LOSS" | "REFUND" | "ROLLBACK" | "OPENING";
 

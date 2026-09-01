@@ -1,4 +1,4 @@
-import { Money } from "../../shared-kernel/money";
+import { Money } from "../../shared-kernel/money.js";
 
 export type LedgerDirection = "DEBIT" | "CREDIT";
 

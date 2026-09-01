@@ -1,19 +1,36 @@
-import { BadRequestException, Body, Controller, Headers, Post } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Inject,
+  NotFoundException,
+  Param,
+  Post,
+} from "@nestjs/common";
 import { Money } from "../../../shared-kernel/money.js";
 import { computePayloadHash } from "../../domain/payload-hash.js";
-import { ProcessWagerUseCase } from "../../application/use-cases/process-wager.use-case.js";
+import { ProcessWagerUseCase, ProcessWagerResult } from "../../application/use-cases/process-wager.use-case.js";
+import {
+  WAGER_TRANSACTION_REPOSITORY,
+  type WagerTransactionRepository,
+} from "../../application/ports/wager-transaction.repository.js";
+import { WagerTransaction } from "../../domain/wager-transaction.js";
 import { IdempotencyService } from "./idempotency.service.js";
 import { SubmitWagerDto } from "./dto/submit-wager.dto.js";
 import { toWagerResponseDto, WagerResponseDto } from "./dto/wager-response.dto.js";
 
-@Controller("wagering")
+@Controller()
 export class WageringController {
   constructor(
     private readonly processWagerUseCase: ProcessWagerUseCase,
     private readonly idempotencyService: IdempotencyService,
+    @Inject(WAGER_TRANSACTION_REPOSITORY)
+    private readonly wagerTransactionRepository: WagerTransactionRepository,
   ) {}
 
-  @Post("transactions")
+  @Post("wagering/transactions")
   async submit(
     @Headers("idempotency-key") idempotencyKey: string | undefined,
     @Body() dto: SubmitWagerDto,
@@ -57,5 +74,41 @@ export class WageringController {
     );
 
     return { ...response, idempotentReplay: idempotentReplay || response.idempotentReplay };
+  }
+
+  @Get("wagering/transactions/:transactionId")
+  async getByTransactionId(@Param("transactionId") transactionId: string): Promise<WagerResponseDto> {
+    const tx = await this.wagerTransactionRepository.findById(transactionId);
+    if (!tx) {
+      throw new NotFoundException(`Transaction ${transactionId} not found`);
+    }
+    return toWagerResponseDto(this.toProcessResult(tx), false);
+  }
+
+  @Get("providers/:providerId/wagering/transactions/:externalTransactionId")
+  async getByExternalId(
+    @Param("providerId") providerId: string,
+    @Param("externalTransactionId") externalTransactionId: string,
+  ): Promise<WagerResponseDto> {
+    const tx = await this.wagerTransactionRepository.findByProviderAndExternalId(providerId, externalTransactionId);
+    if (!tx) {
+      throw new NotFoundException(`Transaction ${externalTransactionId} for provider ${providerId} not found`);
+    }
+    return toWagerResponseDto(this.toProcessResult(tx), false);
+  }
+
+  private toProcessResult(tx: WagerTransaction): ProcessWagerResult {
+    if (tx.status === "PROCESSED") {
+      return { status: "PROCESSED", transactionId: tx.id, balance: tx.resultBalance!, idempotentReplay: false };
+    }
+    if (tx.status === "PENDING_REFERENCE") {
+      return { status: "PENDING_REFERENCE", transactionId: tx.id, idempotentReplay: false };
+    }
+    return {
+      status: "REJECTED",
+      transactionId: tx.id,
+      failureCode: tx.failureCode!,
+      idempotentReplay: false,
+    };
   }
 }

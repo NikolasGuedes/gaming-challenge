@@ -19,7 +19,8 @@
     "test:watch": "bun test --watch src",
     "test:cov": "bun test --coverage src",
     "test:e2e": "bun test test",
-    "mikro-orm": "mikro-orm"
+    "mikro-orm": "mikro-orm",
+    "bootstrap:queues": "bun run src/messaging/infrastructure/sqs/bootstrap-queues.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.1123.0",

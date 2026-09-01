@@ -6,11 +6,10 @@ export default defineConfig({
   entities: ['dist/**/*.entity.js'],
   entitiesTs: ['src/**/*.entity.ts'],
   migrations: {
-    // NOTE: rootDir is "." (see tsconfig.build.json), so compiled output
-    // nests under dist/src/**. Once Task 5+ adds src/migrations/*.ts, the
-    // compiled files will land at dist/src/migrations, not dist/migrations,
-    // and this path must become "dist/src/migrations" to match.
-    path: 'dist/migrations',
+    // rootDir is "." (see tsconfig.build.json), so compiled output nests
+    // under dist/src/**; src/migrations/*.ts therefore compiles to
+    // dist/src/migrations, not dist/migrations.
+    path: 'dist/src/migrations',
     pathTs: 'src/migrations',
   },
   // No entities exist yet (added starting in Task 5); without this, MikroORM

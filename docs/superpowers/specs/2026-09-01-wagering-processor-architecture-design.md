@@ -41,6 +41,15 @@ Stack decidida:
 
 Localização: `src/wagering/domain/`.
 
+**Domínio não depende de NestJS nem do ORM** (exigência explícita do
+enunciado, seção 6.1): `Money`, `Wallet`, `WagerTransaction`,
+`WalletLedgerEntry` são classes TypeScript puras, sem `@Entity()` nem
+decorators do NestJS. Persistência via classes MikroORM separadas
+(`infrastructure/persistence/entities/`) + `Mapper` dedicado
+(`toDomain`/`toPersistence`) por agregado. Um passo a mais de boilerplate,
+mas isolado e fácil de justificar: domínio permanece testável sem banco e
+sem framework.
+
 ### Money (value object)
 
 - Campos: `amount: Decimal` (via `decimal.js`), `currency: string` (ISO-4217).
@@ -96,6 +105,10 @@ Localização: `src/wagering/domain/`.
     `ARCHITECTURE.md` em vez de construir um mecanismo de expiração).
   - Reversões geram lançamento inverso no ledger; nunca editam o lançamento
     original.
+- Rejeições/erros usam um `FailureCode` enum fechado (não strings soltas):
+  `INSUFFICIENT_FUNDS`, `CURRENCY_MISMATCH`, `REFERENCE_NOT_FOUND`,
+  `INVALID_REFERENCE_KIND`, `REFERENCE_ALREADY_REVERSED`, `IDEMPOTENCY_KEY_CONFLICT`.
+  Barato de manter, evita mensagem de erro virar contrato implícito.
 
 ### WalletLedgerEntry
 
@@ -171,6 +184,12 @@ curva exponencial sofisticada — fácil de explicar e suficiente pro escopo).
 
 ## 6. Consumer (SQS → inbox)
 
+**Mesmo use case da entrada HTTP** (`ProcessWagerUseCase`) — exigência
+explícita do enunciado (seção 10). Controller HTTP e consumer SQS são só
+adaptadores finos que traduzem entrada (`Idempotency-Key` header vs
+`messageId`/inbox) e chamam o mesmo `application/use-cases/process-wager.ts`.
+Nenhuma regra de negócio duplicada por canal de entrada.
+
 Ack manual. Processa dentro de uma transação (inbox + wallet + ledger +
 outbox); só remove a mensagem do SQS após commit bem-sucedido. Erro
 transiente → não faz ack, mensagem volta a ficar visível para retry (via
@@ -212,14 +231,19 @@ financeira, concorrência e idempotência — que valem pontos na avaliação.
 ## 9. Módulos NestJS
 
 4 módulos, sem camadas extras que não agregam pra explicar/defender. Cada um
-com `domain/`, `application/`, `infrastructure/`:
+com `domain/` (classes puras), `application/` (use-cases + ports),
+`infrastructure/` (entities MikroORM, mappers, repositórios, adapter SQS):
 
 - `WalletModule` — wallet, ledger, reconciliação.
 - `WageringModule` — `WagerTransaction`, regras BET/WIN/LOSS/REFUND/ROLLBACK,
-  resolução síncrona de `PendingReference`.
+  `ProcessWagerUseCase` (chamado tanto pelo controller HTTP quanto pelo
+  consumer SQS), resolução síncrona de `PendingReference`.
 - `MessagingModule` — inbox (consumer SQS) e outbox (publisher) juntos, são
   as duas faces do mesmo mecanismo de entrega confiável.
 - `HealthModule` — liveness/readiness.
+
+Controllers HTTP ficam em `infrastructure/http/` (ou `presentation/http/` se
+preferir nomear separado) — camada fina, sem regra de negócio.
 
 ## 10. Observabilidade
 
@@ -229,7 +253,26 @@ de métricas (Prometheus/Grafana). Contagem de transações por status,
 profundidade da DLQ e lag de publicação do outbox ficam disponíveis via
 queries SQL simples (documentadas em `ARCHITECTURE.md`), não painel.
 
-## 11. Testes (estratégia, não escopo desta spec)
+## 11. Constraints de schema (obrigatório, não é só validação de aplicação)
+
+Exigência explícita do enunciado (seção 5, restrição 9): unicidade,
+imutabilidade e não-negatividade têm que estar **no schema**, não só em
+código. Isso é avaliado, e é barato de fazer — mantém consistente mesmo com
+bug de aplicação:
+
+- `wallets`: `CHECK (balance >= 0)`; `UNIQUE(player_id, currency)`.
+- `wager_transactions`: `UNIQUE(idempotency_key)`;
+  `UNIQUE(provider_id, external_transaction_id)`.
+- `wallet_ledger_entries`: `UNIQUE(wallet_id, transaction_id)`; tabela
+  protegida contra `UPDATE`/`DELETE` (revoga privilégio da role da aplicação
+  nessas colunas, ou trigger `BEFORE UPDATE OR DELETE` que sempre lança
+  erro) — só `INSERT` é permitido.
+- `inbox_messages`: `PRIMARY KEY(consumer_name, message_id)`.
+- `outbox_messages`: índice em `(published_at, next_attempt_at)` (consulta
+  do publisher).
+- `idempotency_keys`: `UNIQUE(key)`.
+
+## 12. Testes (estratégia, não escopo desta spec)
 
 Cobre só os cenários que o desafio exige — não persegue cobertura extra.
 

@@ -1,14 +1,14 @@
 # Distributed Wagering Processor
 
-Financial service that processes BET/WIN/LOSS/REFUND/ROLLBACK transactions
-from HTTP and SQS, correct under concurrency, persistently idempotent, with
-an auditable ledger. Built for the Jungle Gaming technical challenge.
+Serviço financeiro que processa transações BET/WIN/LOSS/REFUND/ROLLBACK
+vindas de HTTP e SQS, correto sob concorrência, idempotente de forma
+persistente, com ledger auditável.
 
-See `ARCHITECTURE.md` for design decisions, trade-offs, and known
-limitations. See `docs/superpowers/specs/2026-09-01-wagering-processor-architecture-design.md`
-for the full design spec this was built from.
+Veja `ARCHITECTURE.md` pras decisões de design, trade-offs e limitações
+conhecidas. Veja `docs/superpowers/specs/2026-09-01-wagering-processor-architecture-design.md`
+pro spec de design completo a partir do qual isso foi construído.
 
-## Requirements
+## Requisitos
 
 - [Bun](https://bun.sh) 1.x
 - Docker + Docker Compose
@@ -23,91 +23,95 @@ bunx mikro-orm migration:up
 bun run src/messaging/infrastructure/sqs/bootstrap-queues.ts
 ```
 
-If `bunx mikro-orm ...` fails in your environment with a `node:fs`/`globSync`
-error (a known issue on systems whose default `node` predates Node 22's
-`fs.globSync`, since the MikroORM CLI shebang resolves to system `node`, not
-`bun`), run the CLI through Bun directly instead — equivalent, and what was
-actually used to verify this README:
+Se `bunx mikro-orm ...` falhar no seu ambiente com um erro de
+`node:fs`/`globSync` (problema conhecido em sistemas cujo `node` padrão é
+anterior ao Node 22 com `fs.globSync`, já que o shebang da CLI do MikroORM
+resolve pro `node` do sistema, não pro `bun`), roda a CLI via Bun
+diretamente — equivalente, e o que de fato foi usado pra verificar este
+README:
 
 ```bash
 bun run node_modules/@mikro-orm/cli/cli.js migration:up
 ```
 
-## Running
+## Rodando
 
 ```bash
-bun run start:dev        # local, against docker-compose postgres/localstack
-# or
-bun run build && bun run start:prod   # compiled build, closer to production
-# or
-docker compose up -d     # full stack including the app container
+bun run start:dev        # local, contra postgres/localstack do docker-compose
+# ou
+bun run build && bun run start:prod   # build compilado, mais próximo de produção
+# ou
+docker compose up -d     # stack completa incluindo o container da app
 ```
 
-`.env` points at `localhost`, which is correct for host-side runs but wrong
-inside a container; `docker-compose.yml` overrides `DATABASE_URL`,
-`AWS_ENDPOINT_URL` and the two queue URLs for the `app` service to the
-compose service names (`postgres`, `localstack`), so no `.env` edits are
-needed for `docker compose up -d`. Migrations and queue bootstrap still run
-from the host (see Setup) — the app container does not apply them itself.
+`.env` aponta pra `localhost`, o que é correto pra rodar direto no host mas
+errado dentro de um container; `docker-compose.yml` sobrescreve
+`DATABASE_URL`, `AWS_ENDPOINT_URL` e as duas URLs de fila do serviço `app`
+pros nomes dos serviços do compose (`postgres`, `localstack`), então não
+precisa editar o `.env` pra rodar `docker compose up -d`. Migrations e
+bootstrap das filas ainda rodam pelo host (veja Setup) — o container da app
+não aplica isso sozinho.
 
-The API listens on `http://localhost:3000`. Verified directly against this
-worktree: `bun run build` + `bun run start:prod` boots, `/health/live` and
-`/health/ready` respond, and `POST /wallets` → `POST /wagering/transactions`
-→ `GET /wallets/:id/ledger` → `POST /wallets/:id/reconciliation` all round-trip
-correctly end to end against real Postgres and LocalStack.
+A API escuta em `http://localhost:3000`. Verificado diretamente contra este
+worktree: `bun run build` + `bun run start:prod` sobe, `/health/live` e
+`/health/ready` respondem, e `POST /wallets` → `POST /wagering/transactions`
+→ `GET /wallets/:id/ledger` → `POST /wallets/:id/reconciliation` fazem o
+round-trip completo corretamente contra Postgres e LocalStack reais.
 
-`bun run start:dev` shells out to the system `node` binary (via the Nest
-CLI's watcher), so it can hit the same `node:fs`/`globSync` issue noted
-above depending on your environment; `bun run start:prod` (after `bun run
-build`) does not, since it runs the compiled output directly with `bun`.
+`bun run start:dev` chama o binário `node` do sistema (via o watcher da CLI
+do Nest), então pode bater no mesmo problema de `node:fs`/`globSync`
+mencionado acima dependendo do seu ambiente; `bun run start:prod` (depois de
+`bun run build`) não tem esse problema, já que roda o output compilado
+direto com `bun`.
 
-## Testing
+## Testes
 
 ```bash
-bun test src              # unit tests (no containers required)
-bun test test              # integration + concurrency tests (spins up
-                           # Postgres and LocalStack via Testcontainers —
-                           # requires Docker running, no manual setup)
-bun run typecheck          # tsc --noEmit over src/ + test/ (specs included)
+bun test src              # testes unitários (sem containers)
+bun test test              # testes de integração + concorrência (sobe
+                           # Postgres e LocalStack via Testcontainers —
+                           # precisa do Docker rodando, sem setup manual)
+bun run typecheck          # tsc --noEmit sobre src/ + test/ (specs incluídos)
 bun run lint
 ```
 
-All green as of this task: `bun test test/ src` → **67 pass, 0 fail**
-across 18 files, including every mandatory concurrency scenario from the
-challenge brief (hot-wallet contention, 3+ concurrent instances, 50-way
-duplicate-request replay), plus `bun run typecheck` and `bun run lint`
-clean.
+Tudo verde até esta task: `bun test test/ src` → **67 passando, 0 falhando**
+em 18 arquivos, incluindo todo cenário obrigatório de concorrência
+(contenção de hot-wallet, 3+ instâncias concorrentes,
+replay de 50 requisições duplicadas em paralelo), além de `bun run
+typecheck` e `bun run lint` limpos.
 
-`test/e2e-smoke.spec.ts` and the `/health/ready` happy-path case in
-`test/health.spec.ts` are the exceptions — they talk to the docker-compose
-stack on `localhost` directly, so run `docker compose up -d`, apply
-migrations, and bootstrap the queues (see Setup) before running them.
+`test/e2e-smoke.spec.ts` e o caso de sucesso do `/health/ready` em
+`test/health.spec.ts` são as exceções — eles falam direto com a stack do
+docker-compose em `localhost`, então roda `docker compose up -d`, aplica as
+migrations e faz o bootstrap das filas (veja Setup) antes de rodá-los.
 
-## API summary
+## Resumo da API
 
-| Method | Path | Purpose |
+| Método | Path | Propósito |
 |---|---|---|
-| POST | `/wallets` | Open a wallet (optional initial balance → `OPENING` transaction) |
-| GET | `/wallets/:walletId` | Wallet state |
-| GET | `/wallets/:walletId/ledger` | Paginated ledger (`?after=&limit=`) |
-| POST | `/wallets/:walletId/reconciliation` | Recompute balance from the ledger, read-only |
-| POST | `/wagering/transactions` | Submit BET/WIN/LOSS/REFUND/ROLLBACK (`Idempotency-Key` header required) |
-| GET | `/wagering/transactions/:transactionId` | Look up a transaction by internal id |
-| GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | Look up by provider + external id |
-| GET | `/health/live` / `/health/ready` | Liveness / readiness (unauthenticated) |
+| POST | `/wallets` | Abre uma wallet (saldo inicial opcional → transação `OPENING`) |
+| GET | `/wallets/:walletId` | Estado da wallet |
+| GET | `/wallets/:walletId/ledger` | Ledger paginado (`?after=&limit=`) |
+| POST | `/wallets/:walletId/reconciliation` | Recalcula o saldo a partir do ledger, somente leitura |
+| POST | `/wagering/transactions` | Submete BET/WIN/LOSS/REFUND/ROLLBACK (header `Idempotency-Key` obrigatório) |
+| GET | `/wagering/transactions/:transactionId` | Busca uma transação pelo id interno |
+| GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | Busca por provider + id externo |
+| GET | `/health/live` / `/health/ready` | Liveness / readiness (sem autenticação) |
 
-## Not implemented
+## Não implementado
 
-Authentication — a zero-point item per the challenge brief, deliberately
-skipped to protect time for financial correctness, concurrency, and
-idempotency. See `ARCHITECTURE.md` § Authentication.
+Autenticação — deliberadamente deixada de lado pra proteger tempo pra
+correção financeira, concorrência e idempotência. Veja `ARCHITECTURE.md`
+§ Autenticação.
 
-Reliable delivery of `WagerProcessed` outbound notifications to an external
-consumer — the outbox publisher and the SQS wager-submission consumer
-currently share the same queue (the two names the brief mandates), so a
-published notification loops back to the consumer instead of reaching a
-real subscriber. The consumer checks `envelope.type` first, recognises the
-message as not being a wager submission, logs a single `WARN` and acks it
-immediately — no DB transaction, no redelivery, and it is never redriven to
-the DLQ. Harmless, but noisy, and out of scope to fix under this
-challenge's grading criteria. See `ARCHITECTURE.md` § Known limitations.
+Entrega confiável das notificações de saída `WagerProcessed` pra um
+consumidor externo — o publisher do outbox e o consumer de submissão de
+apostas via SQS atualmente compartilham a mesma fila (os dois nomes
+especificados), então uma notificação publicada volta em loop pro
+consumer em vez de chegar a um subscriber de verdade. O consumer checa
+`envelope.type` primeiro, reconhece a mensagem como não sendo uma submissão
+de aposta, loga um único `WARN` e faz o ack imediatamente — sem transação no
+banco, sem redelivery, e nunca é redirecionada pra DLQ. Inofensivo, mas
+ruidoso, e fora de escopo pra esta versão. Veja `ARCHITECTURE.md`
+§ Limitações conhecidas.

@@ -1,351 +1,372 @@
 # Architecture
 
-## Scope decision
+## Princípios de projeto
 
-This project does not target the full 100-point rubric. Priority order:
-(1) the eliminatory requirements — Money never `number`/`float`, no negative
-balance from a race, no duplicate debit/credit, persistent idempotency,
-correctness with 3+ concurrent instances, an auditable ledger, integration
-tests against real Postgres/SQS; (2) everything else (observability depth,
-test breadth, messaging sophistication) kept simple and defensible over
-built to maximize points. Load testing (an optional differential) was not
-attempted.
+Ordem de prioridade: (1) as invariantes que não podem ser violadas de
+jeito nenhum — Money nunca `number`/`float`, sem saldo negativo por race,
+sem débito/crédito duplicado, idempotência persistente, correção com 3+
+instâncias concorrentes, ledger auditável, testes de integração contra
+Postgres/SQS reais; (2) todo o resto (profundidade de observabilidade,
+amplitude de testes, sofisticação de mensageria) mantido simples e
+defensável em vez de construído por construir. Teste de carga não foi
+feito — não é necessário pro que este serviço se propõe a garantir.
 
 ## Stack
 
-- **Bun** — runtime, package manager, native test runner (not vitest).
-- **NestJS** — HTTP framework, dependency injection.
-- **MikroORM** (`@mikro-orm/postgresql`) — chosen over TypeORM (the other
-  acceptable option) for its explicit Unit of Work and
-  `EntityManager.transactional()`, which map cleanly onto "one aggregate,
-  one transaction." Prisma and Drizzle were excluded by the challenge brief.
-  The version actually installed is **MikroORM 7.1.14**, not 5/6 — every
-  entity in this codebase is therefore defined with `defineEntity()` +
-  `Schema.setClass()` (see `src/*/infrastructure/persistence/entities/`),
-  not the `@Entity()`/`@Property()`/`@PrimaryKey()` decorator API from
-  older MikroORM versions. There is no decorator-based entity anywhere in
-  the codebase — this is the one API shape a contributor needs to match.
-- **PostgreSQL** — `NUMERIC(19,4)` for every monetary column: 2 digits of
-  headroom over the 2-decimal boundary enforced at the HTTP edge, so
-  intermediate ledger arithmetic never loses precision. `NUMERIC(19,2)`
-  would also satisfy the brief; the extra scale was a defensive choice, not
-  a requirement.
+- **Bun** — runtime, package manager, test runner nativo (não vitest).
+- **NestJS** — framework HTTP, injeção de dependência.
+- **MikroORM** (`@mikro-orm/postgresql`) — escolhido em vez do TypeORM (a
+  outra opção aceitável) pelo Unit of Work explícito e
+  `EntityManager.transactional()`, que mapeiam bem pra "um agregado, uma
+  transação". Prisma e Drizzle foram descartados por decisão de projeto.
+  A versão de fato instalada é **MikroORM 7.1.14**, não 5/6 — toda entity
+  neste código, portanto, é definida com `defineEntity()` +
+  `Schema.setClass()` (veja `src/*/infrastructure/persistence/entities/`),
+  não com a API de decorators `@Entity()`/`@Property()`/`@PrimaryKey()` de
+  versões mais antigas do MikroORM. Não existe entity baseada em decorator
+  em lugar nenhum do código — é o único formato de API que quem for
+  contribuir precisa respeitar.
+- **PostgreSQL** — `NUMERIC(19,4)` em toda coluna monetária: 2 dígitos de
+  folga sobre o limite de 2 casas decimais exigido na borda HTTP, pra que
+  a aritmética intermediária do ledger nunca perca precisão.
+  `NUMERIC(19,2)` também atenderia a especificação; a escala extra foi uma
+  escolha defensiva, não uma exigência.
 - **AWS SQS via LocalStack** — `wager-transactions.fifo` /
-  `wager-transactions-dlq.fifo` (names mandated by the brief).
-- **decimal.js** — backs the `Money` value object.
-- **Testcontainers** — real Postgres and LocalStack in integration tests,
-  never mocked. The LocalStack module actually installed
-  (`@testcontainers/localstack@12.1.0`) configures which services LocalStack
-  starts via `.withEnvironment({ SERVICES: "sqs" })` — there is no
-  `.withServices([...])` helper in this version, despite that shape existing
-  in some other Testcontainers language bindings. See
-  `test/bootstrap-queues.spec.ts`, `test/inbox-redelivery.spec.ts`, and
-  `test/outbox-publisher-worker.spec.ts` for the pattern to copy when adding
-  further integration tests.
+  `wager-transactions-dlq.fifo` (nomes definidos na especificação).
+- **decimal.js** — sustenta o value object `Money`.
+- **Testcontainers** — Postgres e LocalStack reais nos testes de
+  integração, nunca mockados. O módulo do LocalStack de fato instalado
+  (`@testcontainers/localstack@12.1.0`) configura quais serviços o
+  LocalStack sobe via `.withEnvironment({ SERVICES: "sqs" })` — não existe
+  um helper `.withServices([...])` nessa versão, apesar desse formato
+  existir em outros bindings de linguagem do Testcontainers. Veja
+  `test/bootstrap-queues.spec.ts`, `test/inbox-redelivery.spec.ts` e
+  `test/outbox-publisher-worker.spec.ts` pro padrão a seguir ao adicionar
+  novos testes de integração.
 
-## Domain model
+## Modelo de domínio
 
-`Money`, `Wallet`, `WagerTransaction`, `WalletLedgerEntry` are plain
-TypeScript classes with zero imports from `@nestjs/*` or `@mikro-orm/*`
-(explicit requirement, spec §6.1). Persistence is a separate MikroORM
-entity per aggregate plus a `Mapper` translating both ways
-(`infrastructure/persistence/mappers/`). The extra indirection buys
-domain classes that are unit-testable without a database and unaffected by
-ORM upgrades.
+`Money`, `Wallet`, `WagerTransaction`, `WalletLedgerEntry` são classes
+TypeScript puras, sem nenhum import de `@nestjs/*` ou `@mikro-orm/*`
+(exigência explícita, spec §6.1). A persistência é uma entity MikroORM
+separada por agregado, mais um `Mapper` que traduz nos dois sentidos
+(`infrastructure/persistence/mappers/`). A indireção extra compra classes
+de domínio testáveis sem banco e imunes a upgrades do ORM.
 
-`Wallet.debit`/`credit` are immutable — they return a new `Wallet` plus the
-`WalletLedgerEntry` that justifies the change, never mutate in place.
-Insufficient funds and currency mismatches are **modeled as a result**
-(`{ status: "REJECTED", failureCode }`), not thrown — that's expected
-business flow, not an exceptional one.
+`Wallet.debit`/`credit` são imutáveis — retornam uma nova `Wallet` mais o
+`WalletLedgerEntry` que justifica a mudança, nunca mutam em lugar. Saldo
+insuficiente e conflito de moeda são **modelados como resultado**
+(`{ status: "REJECTED", failureCode }`), não lançados como exceção — é
+fluxo de negócio esperado, não excepcional.
 
-`REFUND` may only reference a `BET`; `ROLLBACK` may reference `BET`, `WIN`,
-or `REFUND`. A reversal whose reference hasn't arrived (or hasn't finished
-processing) yet is stored as `PENDING_REFERENCE` — not rejected. It resolves
-**synchronously**, inside the same SQL transaction that finally processes
-the referenced transaction (no separate polling worker with backoff). This
-is a deliberate simplification: if the referenced transaction never
-arrives, the reversal stays `PENDING_REFERENCE` indefinitely. A production
-system would add a TTL/expiry sweep; this one documents the gap instead of
-building it, per the scope decision above.
+`REFUND` só pode referenciar um `BET`; `ROLLBACK` pode referenciar `BET`,
+`WIN` ou `REFUND`. Uma reversão cuja referência ainda não chegou (ou ainda
+não terminou de processar) fica armazenada como `PENDING_REFERENCE` — não
+é rejeitada. Ela resolve **de forma síncrona**, dentro da mesma transação
+SQL que finalmente processa a transação referenciada (sem worker de
+polling separado com backoff). É uma simplificação deliberada: se a
+transação referenciada nunca chegar, a reversão fica `PENDING_REFERENCE`
+indefinidamente. Um sistema de produção adicionaria uma varredura de
+TTL/expiração; este aqui documenta a lacuna em vez de construí-la, conforme
+a decisão de escopo acima.
 
-## Concurrency
+## Concorrência
 
-Pessimistic locking: `SELECT ... FOR UPDATE` on the wallet row, inside the
-same transaction as the ledger insert, the wallet update, and the outbox
-insert. Chosen over optimistic locking with retry or a conditional atomic
-`UPDATE` because it resolves the mandatory hot-wallet scenario (two
-concurrent 80.00 BETs against a 100.00 balance → exactly one `PROCESSED`,
-one `REJECTED`) without a retry storm under contention. The trade-off:
-writes to the same wallet serialize. That's accepted — the brief expects
-it, and the lock is scoped to one row, so unrelated wallets never wait on
-each other.
+Lock pessimista: `SELECT ... FOR UPDATE` na linha da wallet, dentro da
+mesma transação que o insert do ledger, o update da wallet e o insert do
+outbox. Escolhido em vez de lock otimista com retry ou um `UPDATE` atômico
+condicional porque resolve o cenário obrigatório de hot-wallet (dois BETs
+concorrentes de 80.00 contra um saldo de 100.00 → exatamente um
+`PROCESSED`, um `REJECTED`) sem gerar uma tempestade de retries sob
+contenção. O trade-off: escritas na mesma wallet serializam. Isso é
+aceito — é o comportamento esperado desse padrão, e o lock é escopado a
+uma única linha, então wallets não relacionadas nunca esperam uma pela
+outra.
 
-`ProcessWagerUseCase` also handles a second race: two concurrent requests
-for the *same* `(providerId, externalTransactionId)` can both pass the
-initial "does this transaction already exist?" check before either commits
-— the loser's `INSERT` fails on the unique constraint at commit time. That
-failure is caught and converted into a replay of the winner's result,
-rather than surfacing as an error. Proven under real 50-way concurrency in
+O `ProcessWagerUseCase` também trata uma segunda race: duas requisições
+concorrentes pro *mesmo* `(providerId, externalTransactionId)` podem
+ambas passar pela checagem inicial de "essa transação já existe?" antes
+de qualquer uma commitar — o `INSERT` da que perde falha na unique
+constraint no momento do commit. Essa falha é capturada e convertida num
+replay do resultado da que venceu, em vez de aparecer como erro. Provado
+sob concorrência real de 50 requisições em
 `test/concurrency-hot-wallet.spec.ts`.
 
-`ProcessWagerUseCase` also closes a third race, found and fixed during
-implementation rather than anticipated up front: nothing originally stopped
-two *different* `REFUND`s from both referencing the same already-processed
-`BET` and both crediting the wallet — each request, taken alone, looked
-like a fresh, valid reversal. The fix is `FailureCode.REFERENCE_ALREADY_REVERSED`:
-before crediting, the use case calls
+O `ProcessWagerUseCase` também fecha uma terceira race, encontrada e
+corrigida durante a implementação em vez de antecipada de antemão: nada
+originalmente impedia que dois `REFUND`s *diferentes* referenciassem o
+mesmo `BET` já processado e ambos creditassem a wallet — cada requisição,
+isolada, parecia uma reversão nova e válida. A correção é o
+`FailureCode.REFERENCE_ALREADY_REVERSED`: antes de creditar, o use case
+chama
 `WagerTransactionRepository.findProcessedReversalFor(providerId, externalTransactionId)`
-and rejects a second reversal of a reference that already has one processed
-against it. This is shipped, tested behavior, not a documented gap — see
-the residual race noted under Known limitations, though.
+e rejeita uma segunda reversão de uma referência que já tem uma processada
+contra ela. Isso já está implementado e testado, não é uma lacuna
+documentada — mas veja a race residual anotada em Limitações conhecidas.
 
-Both reversal paths — the direct one above and `resolvePendingReferences`,
-which applies reversals that arrived *before* the transaction they reverse
-— run every reversal rule through one shared `reversalRejection()` helper,
-so they cannot drift apart. Three rules live there: the reference-kind
-check, the already-reversed check (in the pending path this is a local flag
-flipped as soon as one reversal is credited, because a row marked processed
-earlier in the same loop is not yet visible to a re-query, so N pending
-reversals of one `BET` credit the wallet exactly once and the rest are
-`REFERENCE_ALREADY_REVERSED`), and `FailureCode.WALLET_MISMATCH` — a
-reversal whose `walletId` is not the referenced transaction's own wallet is
-rejected outright. Without that last one a caller could refund one player's
-`BET` into a different player's wallet: money created system-wide and
-invisible to per-wallet reconciliation, since each wallet would still match
-its own ledger. The credit is always applied to the referenced
-transaction's locked wallet, never to a caller-supplied id.
+Os dois caminhos de reversão — o direto acima e o
+`resolvePendingReferences`, que aplica reversões que chegaram *antes* da
+transação que elas revertem — passam toda regra de reversão pelo mesmo
+helper compartilhado `reversalRejection()`, então não podem divergir. Três
+regras vivem ali: a checagem de kind da referência, a checagem de
+já-revertido (no caminho pendente isso é uma flag local que vira `true`
+assim que uma reversão é creditada, porque uma linha marcada como
+processada mais cedo no mesmo loop ainda não está visível numa
+re-consulta, então N reversões pendentes de um mesmo `BET` creditam a
+wallet exatamente uma vez e o resto vira `REFERENCE_ALREADY_REVERSED`), e
+o `FailureCode.WALLET_MISMATCH` — uma reversão cujo `walletId` não é o da
+própria wallet da transação referenciada é rejeitada de cara. Sem essa
+última, alguém poderia estornar o `BET` de um jogador na wallet de outro
+jogador: dinheiro criado do nada e invisível pra reconciliação por wallet,
+já que cada wallet continuaria batendo com o próprio ledger. O crédito é
+sempre aplicado na wallet travada da transação referenciada, nunca num id
+informado pelo chamador.
 
-Finally, `ProcessWagerUseCase` rejects any kind that may not be submitted
-externally (`OPENING`, which only `CreateWalletUseCase` mints) with
-`FailureCode.INVALID_KIND` as its very first act. Because the use case is
-the single entry point for both HTTP and SQS, that one check covers both
-channels — the HTTP DTO's `@IsIn` validator is a second line of defence,
-not the only one.
+Por fim, o `ProcessWagerUseCase` rejeita qualquer kind que não pode ser
+submetido externamente (`OPENING`, que só o `CreateWalletUseCase` gera)
+com `FailureCode.INVALID_KIND` como seu primeiro ato. Como o use case é o
+ponto de entrada único tanto pra HTTP quanto pra SQS, essa única checagem
+cobre os dois canais — o validador `@IsIn` do DTO HTTP é uma segunda linha
+de defesa, não a única.
 
-**On testing "3+ instances":** the correctness property (row-level locks,
-unique constraints) lives in Postgres, which cannot distinguish "3
-concurrent connections from 3 forked EntityManagers in one Bun process"
-from "3 separate containers" — both are genuinely concurrent transactions
-over independent connections. The test suite exercises 3+ concurrent
-`ProcessWagerUseCase` instances this way rather than orchestrating 3
-separate `docker compose` app replicas. This is a scope simplification, not
-a claim that the two are identical in every respect (network partitions
-between real replicas aren't exercised).
+**Sobre testar "3+ instâncias":** a propriedade de corretude (locks a nível
+de linha, unique constraints) vive no Postgres, que não distingue "3
+conexões concorrentes de 3 EntityManagers forkados num único processo Bun"
+de "3 containers separados" — ambos são transações genuinamente
+concorrentes sobre conexões independentes. A suite de testes exercita 3+
+instâncias concorrentes do `ProcessWagerUseCase` dessa forma em vez de
+orquestrar 3 réplicas separadas da app via `docker compose`. É uma
+simplificação de escopo, não uma afirmação de que as duas coisas são
+idênticas em todo aspecto (partições de rede entre réplicas reais não são
+exercitadas).
 
-## Idempotency
+## Idempotência
 
-Two layers, both persistent (never in-memory):
+Duas camadas, ambas persistentes (nunca em memória):
 
-- **HTTP** — `idempotency_keys` table, unique on `key`. Same key + same
-  payload hash → cached response replay. Same key + different payload →
-  409.
-- **Messaging** — `inbox_messages` table, primary key
-  `(consumer_name, message_id)`. Checked inside the same transaction as
-  the debit/credit it guards.
+- **HTTP** — tabela `idempotency_keys`, unique em `key`. Mesma key + mesmo
+  hash de payload → replay da resposta cacheada. Mesma key + payload
+  diferente → 409.
+- **Mensageria** — tabela `inbox_messages`, chave primária
+  `(consumer_name, message_id)`. Checada dentro da mesma transação do
+  débito/crédito que ela guarda.
 
-Underneath both, `wager_transactions` has its own
-`UNIQUE (provider_id, external_transaction_id)` — the actual source of
-truth for "has this bet already been processed," independent of which
-channel (HTTP or SQS) it arrived through, and independent of whether the
-HTTP cache or inbox row was written. See the race-handling note above.
+Por baixo das duas, `wager_transactions` tem sua própria
+`UNIQUE (provider_id, external_transaction_id)` — a fonte de verdade real
+pra "essa aposta já foi processada", independente de qual canal (HTTP ou
+SQS) ela chegou, e independente de a linha do cache HTTP ou do inbox ter
+sido gravada. Veja a nota de tratamento de race acima.
 
-## Messaging: inbox and outbox
+## Mensageria: inbox e outbox
 
-Outbox row is written in the same SQL transaction as the ledger — never
-published before commit. A separate `OutboxPublisherWorker` (one per app
-instance, all running the same code) polls with
-`SELECT ... FOR UPDATE SKIP LOCKED`, so N publisher instances never claim
-the same row. Backoff on publish failure is a fixed delay, not an
-exponential curve — simpler to reason about, sufficient for this scope.
+A linha do outbox é gravada na mesma transação SQL do ledger — nunca
+publicada antes do commit. Um `OutboxPublisherWorker` separado (um por
+instância da app, todos rodando o mesmo código) faz polling com
+`SELECT ... FOR UPDATE SKIP LOCKED`, então N instâncias de publisher nunca
+disputam a mesma linha. Backoff em falha de publicação é um delay fixo,
+não uma curva exponencial — mais simples de raciocinar, suficiente pra
+esse escopo.
 
-The SQS consumer and the HTTP controller both call the exact same
-`ProcessWagerUseCase` (explicit requirement, spec §10) — no business logic
-duplicated per entry point.
+O consumer SQS e o controller HTTP chamam exatamente o mesmo
+`ProcessWagerUseCase` (exigência explícita, spec §10) — nenhuma regra de
+negócio duplicada por ponto de entrada.
 
-The consumer distinguishes *business* failures from *transient* ones
-(spec §6). A message that can never succeed — a body that is not JSON, a
-malformed money amount (`InvalidMoneyError`), a currency mismatch, or any
-Nest 4xx such as `NotFoundException` for an unknown wallet — is logged and
-acked on the first receive: retrying it five times before the DLQ would
-only waste receives. Everything else (a dropped DB connection, an SQS
-timeout, a 5xx) is left unacked so the queue redelivers it. The rejecting
-transaction has already rolled back, inbox row included, so acking leaves
-no half-written state behind.
+O consumer distingue falhas de *negócio* de falhas *transientes*
+(spec §6). Uma mensagem que nunca vai dar certo — um body que não é JSON,
+um valor monetário malformado (`InvalidMoneyError`), conflito de moeda, ou
+qualquer 4xx do Nest como `NotFoundException` pra uma wallet desconhecida
+— é logada e recebe ack no primeiro recebimento: tentar de novo cinco
+vezes antes da DLQ só desperdiçaria recebimentos. Todo o resto (uma
+conexão de banco caída, timeout do SQS, um 5xx) fica sem ack pra que a
+fila reentregue. A transação que rejeitou já fez rollback, inbox incluído,
+então dar ack não deixa nenhum estado parcial pra trás.
 
-## Reconciliation
+## Reconciliação
 
-`POST /wallets/:walletId/reconciliation` is read-only. It recomputes the
-balance directly in SQL from every ledger row
-(`sum(CREDIT) - sum(DEBIT)`) and compares it to the materialized
-`wallets.balance`. A mismatch is logged and returned as
-`consistent: false` — never silently corrected.
+`POST /wallets/:walletId/reconciliation` é somente leitura. Recalcula o
+saldo direto em SQL a partir de cada linha do ledger
+(`sum(CREDIT) - sum(DEBIT)`) e compara com o `wallets.balance`
+materializado. Uma divergência é logada e retornada como
+`consistent: false` — nunca corrigida silenciosamente.
 
-## Schema-level invariants
+## Invariantes a nível de schema
 
-Per the brief's explicit requirement (spec §11), the following are enforced
-in Postgres, not only in application code:
+Conforme exigência explícita da especificação (§11), o seguinte é
+garantido no Postgres, não só em código de aplicação:
 
 - `wallets`: `CHECK (balance >= 0)`, `UNIQUE (player_id, currency)`.
 - `wager_transactions`: `UNIQUE (idempotency_key)`,
   `UNIQUE (provider_id, external_transaction_id)`.
-- `wallet_ledger_entries`: `UNIQUE (wallet_id, transaction_id)`, and a
-  trigger (`prevent_ledger_mutation`) that raises on any `UPDATE`/`DELETE`
-  — the ledger is append-only at the database level, not by convention.
+- `wallet_ledger_entries`: `UNIQUE (wallet_id, transaction_id)`, e um
+  trigger (`prevent_ledger_mutation`) que levanta erro em qualquer
+  `UPDATE`/`DELETE` — o ledger é append-only a nível de banco, não por
+  convenção.
 - `inbox_messages`: `PRIMARY KEY (consumer_name, message_id)`.
 
-## Authentication
+## Autenticação
 
-**Not implemented**, per the brief's explicit statement that auth is worth
-zero points and should not compete with financial correctness,
-concurrency, and idempotency. If it were implemented: an external OIDC
-provider (Keycloak or Zitadel), never a hand-rolled user table with
-password hashing. The extension point is explicit in the code —
-`src/shared-kernel/auth/identity-provider.port.ts` and
-`no-op-auth.guard.ts` — but not wired into any controller: every endpoint
-is currently unguarded. Wiring it in for real means implementing
-`IdentityProviderPort` against an actual OIDC provider and applying
-`@UseGuards(...)`; no controller logic would need to change beyond that,
-since business rules never reference the caller's identity directly.
-`/health/live` and `/health/ready` would stay open regardless.
+**Não implementado** — decisão deliberada pra não competir por tempo com
+correção financeira, concorrência e idempotência, que são o que este
+serviço precisa garantir de verdade. Se fosse implementado: um
+provedor OIDC externo (Keycloak ou Zitadel), nunca uma tabela de usuários
+própria com hash de senha. O ponto de extensão está explícito no
+código — `src/shared-kernel/auth/identity-provider.port.ts` e
+`no-op-auth.guard.ts` — mas não conectado a nenhum controller: todo
+endpoint está sem guarda hoje. Conectar de verdade significa implementar
+`IdentityProviderPort` contra um provedor OIDC real e aplicar
+`@UseGuards(...)`; nenhuma lógica de controller precisaria mudar além
+disso, já que as regras de negócio nunca referenciam a identidade de quem
+chama diretamente. `/health/live` e `/health/ready` continuariam abertos
+de qualquer forma.
 
-## Observability
+## Observabilidade
 
-NestJS's default `Logger` — not the JSON-structured logging with
-`correlationId`/`messageId`/`transactionId`/`walletId`/`providerId` fields
-described in the original spec. Wiring a structured logger (e.g. pino) was
-cut to keep this scope small; it's a mechanical follow-up, not a design
-gap. No Prometheus/Grafana stack either. Transaction counts, DLQ depth, and
-outbox lag are answered with a SQL query
-against `wager_transactions`/`outbox_messages`, documented here rather than
-wired into a dashboard:
+`Logger` padrão do NestJS — não o log estruturado em JSON com campos
+`correlationId`/`messageId`/`transactionId`/`walletId`/`providerId`
+descrito no spec original. Conectar um logger estruturado (ex: pino) foi
+cortado pra manter o escopo pequeno; é um follow-up mecânico, não uma
+lacuna de design. Também não tem stack de métricas Prometheus/Grafana.
+Contagem de transações, profundidade da DLQ e lag do outbox são
+respondidos com uma query SQL contra `wager_transactions`/`outbox_messages`,
+documentada aqui em vez de conectada a um dashboard:
 
 ```sql
--- outbox lag
+-- lag do outbox
 select count(*), min(occurred_at)
 from outbox_messages
 where published_at is null;
 
--- transactions by status, last hour
+-- transações por status, última hora
 select status, count(*)
 from wager_transactions
 where created_at > now() - interval '1 hour'
 group by status;
 ```
 
-## Gotchas for contributors
+## Pegadinhas pra quem for contribuir
 
-- Every test that builds a use case from a forked `EntityManager` and needs
-  it to participate correctly in `em.transactional()` must fork with
-  `em.fork({ useContext: true })`. MikroORM 7 defaults `useContext` to
-  `false`, which silently breaks the `AsyncLocalStorage`-based transaction
-  context resolution — the fork will look fine in isolation but any
-  transaction started against it won't see writes from `transactional()`
-  as expected. See `test/wallet-opening.spec.ts` / `test/wallet-reads.spec.ts`
-  for the pattern.
-- Relative imports throughout `src/` use the `.js` extension on the
-  specifier even though the source file is `.ts` (`import ... from
-  "./foo.js"` resolving to `foo.ts`) — required by this project's
-  `moduleResolution: "nodenext"`. Bun tolerates a missing extension at
-  runtime, which is why an extensionless import can sit unnoticed for a
-  while; `tsc` (and therefore `bun run build`, and therefore the Docker
-  image build, which runs it) does not, and fails with `TS2307: Cannot
-  find module`. `src/app.module.ts`'s four feature-module imports were
-  missing the extension until this task's verification pass caught it via
-  an actual `bun run build`.
-- `mikro-orm.config.ts`'s `entities` array lists the six entity classes
-  directly (`[WalletEntity, WalletLedgerEntryEntity, ...]`), not a glob
-  string. It used to be `entities: ['dist/**/*.entity.js']` (later
-  corrected to the still-glob `'dist/src/**/*.entity.js'` mid-investigation)
-  — MikroORM's own glob-based discovery re-`import()`s each matched
-  compiled file to obtain a class reference to register, and under Bun's
-  ESM loader that re-import produced a second, distinct class object per
-  entity: same name, different identity from the class this codebase's own
-  repositories imported statically elsewhere. The result: every
-  `em.persist(...)` against a running `bun run start:prod` (or the
-  Docker image, which runs the same compiled output) threw `ValidationError:
-  Trying to persist not discovered entity ... not the prototype you are
-  passing to the ORM` — even though `bunx mikro-orm debug`/`bun run
-  node_modules/@mikro-orm/cli/cli.js debug` happily reported the glob as
-  "found" and the unit/integration test suite (which never runs the
-  compiled build standalone) stayed green throughout. Passing the classes
-  directly makes MikroORM register the exact object every other module
-  imports, sidestepping the mismatch, and works unchanged whether this
-  file runs as TS (dev/test, via Bun) or as compiled `dist/mikro-orm.config.js`
-  (`start:prod`/Docker) — this file's own imports resolve to the sibling
-  `.entity.ts` source in the former case and to `dist/src/**/*.entity.js` in
-  the latter, exactly like every other `.js`-suffixed relative import in
-  this codebase. If you ever reintroduce a glob-string `entities` array,
-  re-verify by actually running `bun run start:prod` end-to-end (create a
-  wallet, process a transaction) — `bun test` alone will not catch a
-  regression here, since it never executes the compiled artifact.
+- Todo teste que constrói um use case a partir de um `EntityManager`
+  forkado e precisa que ele participe corretamente do
+  `em.transactional()` tem que forkar com `em.fork({ useContext: true })`.
+  O MikroORM 7 padroniza `useContext` como `false`, o que quebra
+  silenciosamente a resolução de contexto de transação baseada em
+  `AsyncLocalStorage` — o fork parece normal isolado, mas qualquer
+  transação iniciada contra ele não vê as escritas do `transactional()`
+  como esperado. Veja `test/wallet-opening.spec.ts` /
+  `test/wallet-reads.spec.ts` pro padrão.
+- Imports relativos em todo `src/` usam a extensão `.js` no specifier
+  mesmo o arquivo fonte sendo `.ts` (`import ... from "./foo.js"`
+  resolvendo pra `foo.ts`) — exigido pelo `moduleResolution: "nodenext"`
+  deste projeto. O Bun tolera falta de extensão em runtime, por isso um
+  import sem extensão pode passar despercebido por um tempo; o `tsc` (e
+  portanto o `bun run build`, e portanto o build da imagem Docker, que
+  roda isso) não tolera, e falha com `TS2307: Cannot find module`. Os
+  quatro imports de módulo de feature em `src/app.module.ts` estavam sem
+  a extensão até essa verificação pegar via um `bun run build` de
+  verdade.
+- O array `entities` do `mikro-orm.config.ts` lista as seis classes de
+  entity diretamente (`[WalletEntity, WalletLedgerEntryEntity, ...]`),
+  não uma string de glob. Antes era `entities: ['dist/**/*.entity.js']`
+  (depois corrigido pro ainda-glob `'dist/src/**/*.entity.js'` no meio da
+  investigação) — o discovery baseado em glob do próprio MikroORM
+  re-`import()`a cada arquivo compilado que casa com o padrão pra obter
+  uma referência de classe pra registrar, e sob o loader ESM do Bun esse
+  re-import produzia um segundo objeto de classe distinto por entity:
+  mesmo nome, identidade diferente da classe que os repositórios deste
+  código importavam estaticamente em outro lugar. O resultado: todo
+  `em.persist(...)` rodando contra um `bun run start:prod` de verdade (ou
+  a imagem Docker, que roda o mesmo output compilado) lançava
+  `ValidationError: Trying to persist not discovered entity ... not the
+  prototype you are passing to the ORM` — mesmo o `bunx mikro-orm
+  debug`/`bun run node_modules/@mikro-orm/cli/cli.js debug` reportando
+  felizes o glob como "encontrado", e a suite de testes unitários/integração
+  (que nunca roda o build compilado isoladamente) continuava verde o
+  tempo todo. Passar as classes diretamente faz o MikroORM registrar o
+  objeto exato que todo outro módulo importa, contornando o
+  descompasso, e funciona sem mudança seja rodando esse arquivo como TS
+  (dev/test, via Bun) ou como `dist/mikro-orm.config.js` compilado
+  (`start:prod`/Docker) — os imports deste arquivo resolvem pro
+  `.entity.ts` irmão no primeiro caso e pro `dist/src/**/*.entity.js` no
+  segundo, exatamente como qualquer outro import relativo com sufixo
+  `.js` neste código. Se algum dia reintroduzir um `entities` baseado em
+  glob-string, reverifica rodando `bun run start:prod` de ponta a ponta
+  de verdade (cria uma wallet, processa uma transação) — só `bun test`
+  não pega uma regressão aqui, já que nunca executa o artefato compilado.
 
-## Known limitations
+## Limitações conhecidas
 
-- **`OutboxPublisherWorker` and `WagerTransactionConsumer` both read
-  `SQS_QUEUE_URL`** — i.e. the same physical `wager-transactions.fifo`
-  queue is used both for inbound wager submissions (what the consumer is
-  built to parse) and outbound `WagerProcessed` domain events (what the
-  publisher writes there from the outbox). Verified end-to-end against the
-  full docker-compose stack: an `OPENING` and a `BET` were each processed
-  correctly over HTTP, and each produced an outbox row that the publisher
-  duly delivered onto `wager-transactions.fifo` — which the consumer then
-  picked back up and recognised as not being a wager submission. The
-  consumer validates `envelope.type` before touching `envelope.data`, so
-  the loopback is now a single `logger.warn` (`message <id> skipped —
-  unexpected envelope type undefined (not a wager transaction request)`)
-  followed by an immediate delete-and-return: the message is acked on the
-  first receive, never retried, and never redriven to the DLQ. No DB
-  transaction is opened for it, so there is nothing to roll back. What
-  remains is log noise on every processed transaction, plus the real
-  functional gap: no external consumer of `WagerProcessed` notifications is
-  realistically usable today, since the same queue immediately turns around
-  and discards its own published messages. Fixing this properly needs
-  either a second, brief-unspecified queue for outbound notifications, or a
-  routing key that lets a real subscriber pick them up — neither was
-  implemented; the two mandated queue names (`wager-transactions.fifo` /
-  DLQ) are used exactly as the brief named them, for inbound processing
-  only. Accepted as out of scope for this challenge's grading (which
-  concerns processing correctness, not outbound event delivery).
-- `PENDING_REFERENCE` has no expiry — a reversal referencing a transaction
-  that never arrives stays pending forever.
-- Transitive pending-reference chains (depth greater than one) do not
-  resolve — e.g. a `ROLLBACK` referencing a `REFUND` that was itself still
-  `PENDING_REFERENCE` at the time. `resolvePendingReferences` only looks one
-  level deep: it resolves reversals that directly reference the transaction
-  just processed, not reversals-of-reversals. Accepted for the same reason
-  as the item above — same class of gap, same scope decision.
-- The double-reversal guard (`FailureCode.REFERENCE_ALREADY_REVERSED`) has
-  a residual TOCTOU race under true concurrency: `findProcessedReversalFor`
-  is queried *before* the wallet row lock is acquired, so two genuinely
-  concurrent `REFUND`s of the same `BET` could theoretically both pass the
-  check before either commits. Unlike the `(provider_id,
-  external_transaction_id)` dedup — which has a DB-level unique constraint
-  backstopping it even if the application check races — there is no
-  equivalent partial unique index backstopping this one. Accepted: this
-  scenario isn't one of the challenge's mandatory concurrency scenarios, and
-  closing it fully would need either a stricter lock ordering or a unique
-  index on "processed reversal per referenced transaction," which is future
-  work if this gets hardened further.
-- The stored `amount` on a `REFUND`/`ROLLBACK` transaction reflects what the
-  caller claimed, not necessarily what was actually reversed — the actual
-  wallet effect always uses the *referenced* transaction's amount (the
-  authoritative source), but no `REVERSAL_AMOUNT_MISMATCH` failure is
-  raised if the two differ. A stricter version would compare and reject.
-- No load testing was performed (optional differential, out of scope).
-- No metrics/dashboard stack — SQL queries substitute for it.
-- Logs are NestJS's default `Logger`, not JSON-structured with
-  `correlationId`/`messageId`/etc. fields as originally sketched — a
-  mechanical follow-up, not a design gap.
-- The ≥3-instances concurrency tests use concurrent `EntityManager` forks
-  in one process rather than separate containers (see the Concurrency
-  section above).
-- `test/concurrency-hot-wallet.spec.ts`'s third scenario (≥3 instances)
-  proves correctness — the unrelated wallet processes correctly alongside
-  the contended one — but does not add a timing assertion proving
-  genuinely non-blocking execution; a global-lock implementation could
-  theoretically still pass it. Accepted: scenarios 1 and 3 in that file
-  already rigorously prove the properties that matter for this brief
-  (mutual exclusion on the contended wallet, idempotent replay under
-  concurrent duplicates), and a timing-based proof of non-blocking
-  execution is inherently flaky in a shared CI environment.
+- **`OutboxPublisherWorker` e `WagerTransactionConsumer` leem os dois de
+  `SQS_QUEUE_URL`** — ou seja, a mesma fila física `wager-transactions.fifo`
+  é usada tanto pras submissões de aposta de entrada (o que o consumer foi
+  construído pra parsear) quanto pros eventos de domínio `WagerProcessed`
+  de saída (o que o publisher escreve ali a partir do outbox). Verificado
+  de ponta a ponta contra a stack completa do docker-compose: um
+  `OPENING` e um `BET` foram processados corretamente via HTTP, e cada um
+  gerou uma linha de outbox que o publisher devidamente entregou em
+  `wager-transactions.fifo` — que o consumer então pegou de volta e
+  reconheceu como não sendo uma submissão de aposta. O consumer valida
+  `envelope.type` antes de tocar em `envelope.data`, então o loop-back
+  hoje é um único `logger.warn` (`message <id> skipped — unexpected
+  envelope type undefined (not a wager transaction request)`) seguido de
+  um delete-e-retorno imediato: a mensagem recebe ack no primeiro
+  recebimento, nunca é tentada de novo, e nunca é redirecionada pra DLQ.
+  Nenhuma transação de banco é aberta pra ela, então não tem nada pra dar
+  rollback. O que sobra é ruído de log em toda transação processada, mais
+  a lacuna funcional real: nenhum consumidor externo das notificações
+  `WagerProcessed` é utilizável de forma realista hoje, já que a mesma
+  fila imediatamente descarta suas próprias mensagens publicadas. Corrigir
+  isso direito precisa ou de uma segunda fila pras notificações de saída,
+  ou de uma routing key que deixe um subscriber de verdade pegá-las —
+  nenhuma das duas foi implementada; as duas filas especificadas
+  (`wager-transactions.fifo` / DLQ) são usadas exatamente como nomeadas,
+  só pro processamento de entrada. Aceito como fora de escopo — o foco
+  aqui é corretude de processamento, não entrega de evento de saída.
+- `PENDING_REFERENCE` não tem expiração — uma reversão referenciando uma
+  transação que nunca chega fica pendente pra sempre.
+- Cadeias transitivas de referência pendente (profundidade maior que um)
+  não resolvem — ex: um `ROLLBACK` referenciando um `REFUND` que ainda
+  estava `PENDING_REFERENCE` na hora. `resolvePendingReferences` só olha
+  um nível de profundidade: resolve reversões que referenciam diretamente
+  a transação recém-processada, não reversões-de-reversões. Aceito pelo
+  mesmo motivo do item acima — mesma classe de lacuna, mesma decisão de
+  escopo.
+- O guard de dupla-reversão (`FailureCode.REFERENCE_ALREADY_REVERSED`)
+  tem uma race residual do tipo TOCTOU sob concorrência real:
+  `findProcessedReversalFor` é consultado *antes* do lock da linha da
+  wallet ser adquirido, então dois `REFUND`s genuinamente concorrentes do
+  mesmo `BET` poderiam, em teoria, ambos passar pela checagem antes de
+  qualquer um commitar. Diferente do dedup de `(provider_id,
+  external_transaction_id)` — que tem uma unique constraint a nível de
+  banco como último recurso mesmo se a checagem de aplicação perder a
+  race — não existe um índice único parcial equivalente cobrindo esse
+  caso. Aceito: esse cenário não é um dos cenários de concorrência
+  obrigatórios cobertos pela suite de testes, e fechar isso por completo
+  precisaria ou de
+  ordenação de lock mais estrita ou de um índice único em "reversão
+  processada por transação referenciada", o que fica como trabalho futuro
+  se isso for endurecido mais.
+- O `amount` armazenado numa transação `REFUND`/`ROLLBACK` reflete o que
+  quem chamou alegou, não necessariamente o que foi de fato revertido — o
+  efeito real na wallet sempre usa o amount da transação *referenciada*
+  (a fonte de verdade), mas nenhuma falha `REVERSAL_AMOUNT_MISMATCH` é
+  levantada se os dois divergirem. Uma versão mais rígida compararia e
+  rejeitaria.
+- Nenhum teste de carga foi feito — fora de escopo pro que este serviço
+  precisa garantir.
+- Sem stack de métricas/dashboard — queries SQL fazem esse papel.
+- Logs são o `Logger` padrão do NestJS, não estruturados em JSON com
+  campos `correlationId`/`messageId`/etc como esboçado originalmente — um
+  follow-up mecânico, não uma lacuna de design.
+- Os testes de concorrência de ≥3 instâncias usam `EntityManager`
+  forkados concorrentes num único processo em vez de containers
+  separados (veja a seção Concorrência acima).
+- O terceiro cenário de `test/concurrency-hot-wallet.spec.ts` (≥3
+  instâncias) prova corretude — a wallet não relacionada processa
+  corretamente junto com a contenciosa — mas não adiciona uma asserção de
+  timing provando execução genuinamente não-bloqueante; uma implementação
+  com lock global poderia, em teoria, ainda passar nele. Aceito: os
+  cenários 1 e 3 desse arquivo já provam rigorosamente as propriedades
+  que importam (exclusão mútua na wallet contenciosa,
+  replay idempotente sob duplicatas concorrentes), e uma prova baseada em
+  timing de execução não-bloqueante é inerentemente instável num ambiente
+  de CI compartilhado.

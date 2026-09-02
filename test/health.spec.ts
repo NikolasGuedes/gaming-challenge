@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { SQSClient } from "@aws-sdk/client-sqs";
-import { HealthController } from "../src/health/health.controller";
-import { startTestDatabase, stopTestDatabase, TestDatabase } from "./support/testcontainers-env";
+import { HealthController } from "../src/health/health.controller.js";
+import { startTestDatabase, stopTestDatabase, TestDatabase } from "./support/testcontainers-env.js";
 
 describe("HealthController", () => {
   let db: TestDatabase;

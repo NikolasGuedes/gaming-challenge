@@ -38,7 +38,11 @@ describe("WageringController — HTTP idempotency", () => {
       new MikroOrmOutboxRepository(em, undefined as never),
     );
     const idempotencyService = new IdempotencyService(new MikroOrmIdempotencyKeyRepository(em), em);
-    return new WageringController(processWagerUseCase, idempotencyService);
+    return new WageringController(
+      processWagerUseCase,
+      idempotencyService,
+      new MikroOrmWagerTransactionRepository(em),
+    );
   }
 
   const baseDto = {

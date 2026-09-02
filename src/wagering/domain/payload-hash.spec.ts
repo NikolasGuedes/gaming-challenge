@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { computePayloadHash } from "./payload-hash";
+import { computePayloadHash } from "./payload-hash.js";
 
 describe("computePayloadHash", () => {
   it("is stable regardless of key order", () => {

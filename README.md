@@ -43,6 +43,13 @@ bun run build && bun run start:prod   # compiled build, closer to production
 docker compose up -d     # full stack including the app container
 ```
 
+`.env` points at `localhost`, which is correct for host-side runs but wrong
+inside a container; `docker-compose.yml` overrides `DATABASE_URL`,
+`AWS_ENDPOINT_URL` and the two queue URLs for the `app` service to the
+compose service names (`postgres`, `localstack`), so no `.env` edits are
+needed for `docker compose up -d`. Migrations and queue bootstrap still run
+from the host (see Setup) — the app container does not apply them itself.
+
 The API listens on `http://localhost:3000`. Verified directly against this
 worktree: `bun run build` + `bun run start:prod` boots, `/health/live` and
 `/health/ready` respond, and `POST /wallets` → `POST /wagering/transactions`
@@ -61,16 +68,20 @@ bun test src              # unit tests (no containers required)
 bun test test              # integration + concurrency tests (spins up
                            # Postgres and LocalStack via Testcontainers —
                            # requires Docker running, no manual setup)
+bun run typecheck          # tsc --noEmit over src/ + test/ (specs included)
+bun run lint
 ```
 
-Both are green as of this task: `bun test test/ src` → **60 pass, 0 fail**
+All green as of this task: `bun test test/ src` → **67 pass, 0 fail**
 across 18 files, including every mandatory concurrency scenario from the
 challenge brief (hot-wallet contention, 3+ concurrent instances, 50-way
-duplicate-request replay).
+duplicate-request replay), plus `bun run typecheck` and `bun run lint`
+clean.
 
-`test/e2e-smoke.spec.ts` is the exception — it exercises the docker-compose
-stack directly, so run `docker compose up -d`, apply migrations, and
-bootstrap the queues (see Setup) before running it.
+`test/e2e-smoke.spec.ts` and the `/health/ready` happy-path case in
+`test/health.spec.ts` are the exceptions — they talk to the docker-compose
+stack on `localhost` directly, so run `docker compose up -d`, apply
+migrations, and bootstrap the queues (see Setup) before running them.
 
 ## API summary
 
@@ -94,7 +105,9 @@ idempotency. See `ARCHITECTURE.md` § Authentication.
 Reliable delivery of `WagerProcessed` outbound notifications to an external
 consumer — the outbox publisher and the SQS wager-submission consumer
 currently share the same queue (the two names the brief mandates), so a
-published notification loops back and is rejected by the consumer rather
-than reaching a real subscriber. Harmless (no partial writes; the failure
-rolls back cleanly) but noisy, and out of scope to fix under this
+published notification loops back to the consumer instead of reaching a
+real subscriber. The consumer checks `envelope.type` first, recognises the
+message as not being a wager submission, logs a single `WARN` and acks it
+immediately — no DB transaction, no redelivery, and it is never redriven to
+the DLQ. Harmless, but noisy, and out of scope to fix under this
 challenge's grading criteria. See `ARCHITECTURE.md` § Known limitations.

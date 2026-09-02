@@ -4,3 +4,5 @@ dist/
 *.log
 .DS_Store
 tsconfig.build.tsbuildinfo
+# MikroORM writes a schema snapshot next to the migrations when the test suite runs
+src/migrations/.snapshot-*.json

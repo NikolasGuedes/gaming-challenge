@@ -100,6 +100,29 @@ and rejects a second reversal of a reference that already has one processed
 against it. This is shipped, tested behavior, not a documented gap — see
 the residual race noted under Known limitations, though.
 
+Both reversal paths — the direct one above and `resolvePendingReferences`,
+which applies reversals that arrived *before* the transaction they reverse
+— run every reversal rule through one shared `reversalRejection()` helper,
+so they cannot drift apart. Three rules live there: the reference-kind
+check, the already-reversed check (in the pending path this is a local flag
+flipped as soon as one reversal is credited, because a row marked processed
+earlier in the same loop is not yet visible to a re-query, so N pending
+reversals of one `BET` credit the wallet exactly once and the rest are
+`REFERENCE_ALREADY_REVERSED`), and `FailureCode.WALLET_MISMATCH` — a
+reversal whose `walletId` is not the referenced transaction's own wallet is
+rejected outright. Without that last one a caller could refund one player's
+`BET` into a different player's wallet: money created system-wide and
+invisible to per-wallet reconciliation, since each wallet would still match
+its own ledger. The credit is always applied to the referenced
+transaction's locked wallet, never to a caller-supplied id.
+
+Finally, `ProcessWagerUseCase` rejects any kind that may not be submitted
+externally (`OPENING`, which only `CreateWalletUseCase` mints) with
+`FailureCode.INVALID_KIND` as its very first act. Because the use case is
+the single entry point for both HTTP and SQS, that one check covers both
+channels — the HTTP DTO's `@IsIn` validator is a second line of defence,
+not the only one.
+
 **On testing "3+ instances":** the correctness property (row-level locks,
 unique constraints) lives in Postgres, which cannot distinguish "3
 concurrent connections from 3 forked EntityManagers in one Bun process"
@@ -139,6 +162,16 @@ exponential curve — simpler to reason about, sufficient for this scope.
 The SQS consumer and the HTTP controller both call the exact same
 `ProcessWagerUseCase` (explicit requirement, spec §10) — no business logic
 duplicated per entry point.
+
+The consumer distinguishes *business* failures from *transient* ones
+(spec §6). A message that can never succeed — a body that is not JSON, a
+malformed money amount (`InvalidMoneyError`), a currency mismatch, or any
+Nest 4xx such as `NotFoundException` for an unknown wallet — is logged and
+acked on the first receive: retrying it five times before the DLQ would
+only waste receives. Everything else (a dropped DB connection, an SQS
+timeout, a 5xx) is left unacked so the queue redelivers it. The rejecting
+transaction has already rolled back, inbox row included, so acking leaves
+no half-written state behind.
 
 ## Reconciliation
 
@@ -247,38 +280,33 @@ group by status;
   wallet, process a transaction) — `bun test` alone will not catch a
   regression here, since it never executes the compiled artifact.
 
-## Known limitations (found during this task's end-to-end verification)
+## Known limitations
 
 - **`OutboxPublisherWorker` and `WagerTransactionConsumer` both read
   `SQS_QUEUE_URL`** — i.e. the same physical `wager-transactions.fifo`
   queue is used both for inbound wager submissions (what the consumer is
   built to parse) and outbound `WagerProcessed` domain events (what the
-  publisher writes there from the outbox). Verified by running the full
-  stack (`bun run start:prod` against the compiled build) end-to-end: an
-  `OPENING` and a `BET` were each processed correctly over HTTP, and each
-  produced an outbox row that the publisher duly delivered onto
-  `wager-transactions.fifo` — which the consumer then picked back up,
-  failed to parse as a wager-submission envelope (`TypeError: undefined is
-  not an object (evaluating 'envelope.data.externalTransactionId')`), and
-  logged an error. This is benign, not a correctness bug: the failure
-  happens inside the same DB transaction as the (no-op) processing attempt,
-  which rolls back cleanly with no partial writes, and the message would
-  eventually redrive to the DLQ after repeated receive failures. But it is
-  wasted work and log noise on every processed transaction, and it means
-  no external consumer of `WagerProcessed` notifications is realistically
-  usable today, since the same queue immediately turns around and rejects
-  its own published messages. Fixing this properly needs either a second,
-  brief-unspecified queue for outbound notifications, or a way for the
-  consumer to distinguish and skip messages it didn't publish (e.g. a
-  message attribute) — neither was implemented; the two mandated queue
-  names (`wager-transactions.fifo` / DLQ) are used exactly as the brief
-  named them, for inbound processing only. Accepted as out of scope for
-  this challenge's grading (which concerns processing correctness, not
-  outbound event delivery), documented rather than fixed under this task's
-  budget.
-
-## Known limitations
-
+  publisher writes there from the outbox). Verified end-to-end against the
+  full docker-compose stack: an `OPENING` and a `BET` were each processed
+  correctly over HTTP, and each produced an outbox row that the publisher
+  duly delivered onto `wager-transactions.fifo` — which the consumer then
+  picked back up and recognised as not being a wager submission. The
+  consumer validates `envelope.type` before touching `envelope.data`, so
+  the loopback is now a single `logger.warn` (`message <id> skipped —
+  unexpected envelope type undefined (not a wager transaction request)`)
+  followed by an immediate delete-and-return: the message is acked on the
+  first receive, never retried, and never redriven to the DLQ. No DB
+  transaction is opened for it, so there is nothing to roll back. What
+  remains is log noise on every processed transaction, plus the real
+  functional gap: no external consumer of `WagerProcessed` notifications is
+  realistically usable today, since the same queue immediately turns around
+  and discards its own published messages. Fixing this properly needs
+  either a second, brief-unspecified queue for outbound notifications, or a
+  routing key that lets a real subscriber pick them up — neither was
+  implemented; the two mandated queue names (`wager-transactions.fifo` /
+  DLQ) are used exactly as the brief named them, for inbound processing
+  only. Accepted as out of scope for this challenge's grading (which
+  concerns processing correctness, not outbound event delivery).
 - `PENDING_REFERENCE` has no expiry — a reversal referencing a transaction
   that never arrives stays pending forever.
 - Transitive pending-reference chains (depth greater than one) do not

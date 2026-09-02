@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { Money } from "../../shared-kernel/money";
-import { FailureCode } from "../../shared-kernel/failure-code";
-import { Wallet } from "./wallet";
+import { Money } from "../../shared-kernel/money.js";
+import { FailureCode } from "../../shared-kernel/failure-code.js";
+import { Wallet } from "./wallet.js";
 
 describe("Wallet.open", () => {
   it("does not create an opening entry when initial balance is zero", () => {

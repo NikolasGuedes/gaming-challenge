@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { Money } from "../../shared-kernel/money";
-import { FailureCode } from "../../shared-kernel/failure-code";
+import { Money } from "../../shared-kernel/money.js";
+import { FailureCode } from "../../shared-kernel/failure-code.js";
 import {
   isExternallySubmittableKind,
   validateReferenceKind,
   WagerTransaction,
-} from "./wager-transaction";
+} from "./wager-transaction.js";
 
 describe("isExternallySubmittableKind", () => {
   it("rejects OPENING, accepts the rest", () => {

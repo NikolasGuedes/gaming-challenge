@@ -15,6 +15,7 @@
     "start:debug": "nest start --debug --watch",
     "start:prod": "bun dist/src/main.js",
     "lint": "oxlint src/ test/",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test src",
     "test:watch": "bun test --watch src",
     "test:cov": "bun test --coverage src",

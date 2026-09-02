@@ -3,6 +3,15 @@ services:
     build: .
     env_file:
       - .env
+    # .env is written for host-side development, where postgres/localstack are reachable on
+    # localhost. Inside this container `localhost` is the container itself, so the connection
+    # settings are overridden here with the compose service names — `environment` wins over
+    # `env_file`, so everything else in .env still applies.
+    environment:
+      DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering
+      AWS_ENDPOINT_URL: http://localstack:4566
+      SQS_QUEUE_URL: http://localstack:4566/000000000000/wager-transactions.fifo
+      SQS_DLQ_URL: http://localstack:4566/000000000000/wager-transactions-dlq.fifo
     ports:
       - '3000:3000'
     depends_on:

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { Money } from "./money";
-import { CurrencyMismatchError, InvalidMoneyError } from "./money.errors";
+import { Money } from "./money.js";
+import { CurrencyMismatchError, InvalidMoneyError } from "./money.errors.js";
 
 describe("Money", () => {
   it("creates from a valid decimal string", () => {

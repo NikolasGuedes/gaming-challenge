@@ -8,7 +8,13 @@ import {
   type WalletRepository,
 } from "../../../wallet/application/ports/wallet.repository.js";
 import { OUTBOX_REPOSITORY, type OutboxRepository } from "../../../messaging/application/ports/outbox.repository.js";
-import { type WagerKind, WagerTransaction, validateReferenceKind } from "../../domain/wager-transaction.js";
+import {
+  type WagerKind,
+  WagerTransaction,
+  isExternallySubmittableKind,
+  validateReferenceKind,
+  validateReversalWallet,
+} from "../../domain/wager-transaction.js";
 import {
   WAGER_TRANSACTION_REPOSITORY,
   type WagerTransactionRepository,
@@ -33,6 +39,31 @@ export type ProcessWagerResult = (
 
 function originalDirectionOf(kind: WagerKind): "DEBIT" | "CREDIT" {
   return kind === "BET" || kind === "LOSS" ? "DEBIT" : "CREDIT";
+}
+
+/**
+ * Every rule a REFUND/ROLLBACK must satisfy against the transaction it reverses, in one place.
+ *
+ * There are two paths that can apply a reversal — the direct submission path (the reference was
+ * already PROCESSED when the reversal arrived) and the pending-resolution path (the reversal
+ * arrived first, waited as PENDING_REFERENCE, and is resolved when the reference lands). Both
+ * call this, so they cannot drift apart: whatever one rejects, the other rejects identically.
+ *
+ * `referencedWalletId` is always the wallet that is actually about to be credited (the locked
+ * wallet), never a value the caller supplied.
+ */
+function reversalRejection(input: {
+  kind: WagerKind;
+  submittedWalletId: string;
+  referencedKind: WagerKind;
+  referencedWalletId: string;
+  alreadyReversed: boolean;
+}): FailureCode | null {
+  return (
+    validateReferenceKind(input.kind, input.referencedKind) ??
+    validateReversalWallet(input.submittedWalletId, input.referencedWalletId) ??
+    (input.alreadyReversed ? FailureCode.REFERENCE_ALREADY_REVERSED : null)
+  );
 }
 
 @Injectable()
@@ -69,6 +100,14 @@ export class ProcessWagerUseCase {
   }
 
   private async executeWithinTransaction(input: ProcessWagerInput): Promise<ProcessWagerResult> {
+    // This use case is the single entry point for BOTH HTTP and SQS (spec §10), so kinds that
+    // may never be submitted from outside (OPENING, which only CreateWalletUseCase mints) are
+    // rejected here — once — instead of in each adapter, where one of them would inevitably
+    // forget. Without this, an SQS envelope with kind "OPENING" would be credited as real money.
+    if (!isExternallySubmittableKind(input.kind)) {
+      return this.rejectNew(input, FailureCode.INVALID_KIND);
+    }
+
     const existing = await this.wagerTransactionRepository.findByProviderAndExternalId(
       input.providerId,
       input.externalTransactionId,
@@ -81,14 +120,7 @@ export class ProcessWagerUseCase {
 
     if (input.kind === "REFUND" || input.kind === "ROLLBACK") {
       if (!input.referenceExternalTransactionId) {
-        const tx = this.newTransaction(input).markRejected(FailureCode.REFERENCE_NOT_FOUND);
-        await this.wagerTransactionRepository.save(tx);
-        return {
-          status: "REJECTED",
-          transactionId: tx.id,
-          failureCode: FailureCode.REFERENCE_NOT_FOUND,
-          idempotentReplay: false,
-        };
+        return this.rejectNew(input, FailureCode.REFERENCE_NOT_FOUND);
       }
 
       referencedTx = await this.wagerTransactionRepository.findByProviderAndExternalId(
@@ -102,29 +134,21 @@ export class ProcessWagerUseCase {
         return { status: "PENDING_REFERENCE", transactionId: tx.id, idempotentReplay: false };
       }
 
-      const invalidRefCode = validateReferenceKind(input.kind, referencedTx.kind);
-      if (invalidRefCode) {
-        const tx = this.newTransaction(input).markRejected(invalidRefCode);
-        await this.wagerTransactionRepository.save(tx);
-        return { status: "REJECTED", transactionId: tx.id, failureCode: invalidRefCode, idempotentReplay: false };
-      }
+      const alreadyReversed =
+        (await this.wagerTransactionRepository.findProcessedReversalFor(
+          input.providerId,
+          input.referenceExternalTransactionId,
+        )) !== null;
 
-      // Guard against two distinct REFUND/ROLLBACK submissions (different externalTransactionId)
-      // both reversing the same referenced transaction — without this, both would pass the checks
-      // above and both would credit the wallet, a real double-credit.
-      const existingReversal = await this.wagerTransactionRepository.findProcessedReversalFor(
-        input.providerId,
-        input.referenceExternalTransactionId,
-      );
-      if (existingReversal) {
-        const tx = this.newTransaction(input).markRejected(FailureCode.REFERENCE_ALREADY_REVERSED);
-        await this.wagerTransactionRepository.save(tx);
-        return {
-          status: "REJECTED",
-          transactionId: tx.id,
-          failureCode: FailureCode.REFERENCE_ALREADY_REVERSED,
-          idempotentReplay: false,
-        };
+      const rejection = reversalRejection({
+        kind: input.kind,
+        submittedWalletId: input.walletId,
+        referencedKind: referencedTx.kind,
+        referencedWalletId: referencedTx.walletId,
+        alreadyReversed,
+      });
+      if (rejection) {
+        return this.rejectNew(input, rejection);
       }
     }
 
@@ -162,6 +186,13 @@ export class ProcessWagerUseCase {
     wallet = await this.resolvePendingReferences(wallet, processedTx);
 
     return { status: "PROCESSED", transactionId: tx.id, balance: wallet.balance, idempotentReplay: false };
+  }
+
+  /** Persists a brand-new transaction row in REJECTED state and returns the rejection result. */
+  private async rejectNew(input: ProcessWagerInput, failureCode: FailureCode): Promise<ProcessWagerResult> {
+    const tx = this.newTransaction(input).markRejected(failureCode);
+    await this.wagerTransactionRepository.save(tx);
+    return { status: "REJECTED", transactionId: tx.id, failureCode, idempotentReplay: false };
   }
 
   private newTransaction(input: ProcessWagerInput): WagerTransaction {
@@ -213,10 +244,29 @@ export class ProcessWagerUseCase {
       justProcessed.externalTransactionId,
     );
     let currentWallet = wallet;
+    // `currentWallet` is the wallet the just-processed transaction belongs to and the only wallet
+    // this method ever credits; a pending row whose own walletId disagrees with it is rejected
+    // (WALLET_MISMATCH) rather than silently redirected. Seeded from the DB in case a reversal was
+    // somehow already applied, then flipped locally: at most ONE pending reversal per referenced
+    // transaction may be credited, every later one is REFERENCE_ALREADY_REVERSED. (A local flag,
+    // not a re-query: `save()` only calls `em.persist()`, so a reversal marked PROCESSED earlier in
+    // this loop is not yet visible to `findProcessedReversalFor`'s SELECT until the next flush —
+    // and even after a flush, MikroORM's identity map could return the stale row.)
+    let alreadyReversed =
+      (await this.wagerTransactionRepository.findProcessedReversalFor(
+        justProcessed.providerId,
+        justProcessed.externalTransactionId,
+      )) !== null;
     for (const pending of pendingRows) {
-      const invalidRefCode = validateReferenceKind(pending.kind, justProcessed.kind);
-      if (invalidRefCode) {
-        await this.wagerTransactionRepository.save(pending.markRejected(invalidRefCode));
+      const rejection = reversalRejection({
+        kind: pending.kind,
+        submittedWalletId: pending.walletId,
+        referencedKind: justProcessed.kind,
+        referencedWalletId: currentWallet.id,
+        alreadyReversed,
+      });
+      if (rejection) {
+        await this.wagerTransactionRepository.save(pending.markRejected(rejection));
         continue;
       }
       const applyResult = this.applyToWallet(
@@ -231,6 +281,7 @@ export class ProcessWagerUseCase {
         continue;
       }
       currentWallet = applyResult.wallet;
+      alreadyReversed = true;
       await this.wagerTransactionRepository.save(pending.markProcessed(currentWallet.balance));
       await this.em.flush();
       await this.walletRepository.appendLedgerEntry(applyResult.entry);

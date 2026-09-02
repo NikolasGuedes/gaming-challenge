@@ -4,5 +4,9 @@ export enum FailureCode {
   REFERENCE_NOT_FOUND = "REFERENCE_NOT_FOUND",
   INVALID_REFERENCE_KIND = "INVALID_REFERENCE_KIND",
   REFERENCE_ALREADY_REVERSED = "REFERENCE_ALREADY_REVERSED",
+  /** A REFUND/ROLLBACK named a different wallet than the transaction it reverses. */
+  WALLET_MISMATCH = "WALLET_MISMATCH",
+  /** A kind that may never be submitted externally (OPENING) reached the use case. */
+  INVALID_KIND = "INVALID_KIND",
   IDEMPOTENCY_KEY_CONFLICT = "IDEMPOTENCY_KEY_CONFLICT",
 }

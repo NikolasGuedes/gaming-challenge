@@ -23,6 +23,19 @@ export function validateReferenceKind(kind: WagerKind, referencedKind: WagerKind
   return null;
 }
 
+/**
+ * A REFUND/ROLLBACK moves money on the wallet the referenced transaction belongs to — never on
+ * a wallet named by the caller. A submission whose walletId disagrees with the referenced
+ * transaction's wallet would otherwise credit an unrelated wallet: money created system-wide,
+ * invisible to per-wallet reconciliation (each wallet still matches its own ledger).
+ */
+export function validateReversalWallet(
+  submittedWalletId: string,
+  referencedWalletId: string,
+): FailureCode | null {
+  return submittedWalletId === referencedWalletId ? null : FailureCode.WALLET_MISMATCH;
+}
+
 export class WagerTransaction {
   private constructor(
     readonly id: string,

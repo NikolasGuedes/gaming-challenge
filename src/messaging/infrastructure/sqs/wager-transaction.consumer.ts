@@ -16,6 +16,8 @@ import { MikroOrmOutboxRepository } from "../persistence/repositories/outbox.rep
 import { MikroOrmInboxRepository } from "../persistence/repositories/inbox.repository.js";
 import { SQS_CLIENT } from "./sqs-client.provider.js";
 
+const WAGER_TRANSACTION_REQUESTED_TYPE = "WagerTransactionRequested";
+
 export interface WagerTransactionEnvelope {
   messageId: string;
   type: string;
@@ -85,6 +87,31 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
 
   async handleMessage(message: Message): Promise<void> {
     const envelope = JSON.parse(message.Body!) as WagerTransactionEnvelope;
+
+    // Defensive shape check: this queue is also the target of the outbox
+    // publisher's `WagerProcessed` domain events (see ARCHITECTURE.md's
+    // Known limitations — the two are not meant to share a queue, but the
+    // brief only names one). Today those events happen to have an
+    // incompatible shape (`eventType`/`payload`, not `type`/`data`), so
+    // they'd already fail below and redrive to the DLQ — but only by
+    // coincidence, not because anything actually validates the envelope.
+    // Reject anything that isn't an actual wager-submission request before
+    // touching `envelope.data`, so a future event whose payload happens to
+    // resemble a wager submission is never mistaken for one.
+    if (envelope.type !== WAGER_TRANSACTION_REQUESTED_TYPE) {
+      this.logger.warn(
+        `message ${message.MessageId} has unexpected envelope type ${String(envelope.type)} — skipping (not a wager transaction request)`,
+      );
+      try {
+        await this.sqsClient.send(
+          new DeleteMessageCommand({ QueueUrl: this.queueUrl, ReceiptHandle: message.ReceiptHandle! }),
+        );
+      } catch (err) {
+        this.logger.debug(`ack for skipped message ${message.MessageId} failed: ${(err as Error).message}`);
+      }
+      return;
+    }
+
     const em = this.orm.em.fork();
 
     await em.transactional(async (tx) => {

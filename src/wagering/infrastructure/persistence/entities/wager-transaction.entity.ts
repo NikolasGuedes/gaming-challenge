@@ -6,6 +6,9 @@ const WagerTransactionSchema = defineEntity({
   properties: {
     id: p.uuid().primary(),
     walletId: p.uuid(),
+    playerId: p.string(),
+    roundId: p.string(),
+    gameId: p.string(),
     externalTransactionId: p.string(),
     providerId: p.string(),
     idempotencyKey: p.string(),
@@ -14,10 +17,15 @@ const WagerTransactionSchema = defineEntity({
     amount: p.decimal().precision(19).scale(4),
     currency: p.string().length(3),
     referenceExternalTransactionId: p.text().strictNullable(),
+    referenceTransactionId: p.uuid().strictNullable(),
     status: p.string(),
     failureCode: p.text().strictNullable(),
     resultBalanceAmount: p.decimal().precision(19).scale(4).strictNullable(),
     resultBalanceCurrency: p.string().length(3).strictNullable(),
+    processedAt: p.datetime().strictNullable(),
+    referenceAttempts: p.integer().default(0),
+    nextReferenceAttemptAt: p.datetime().strictNullable(),
+    referenceExpiresAt: p.datetime().strictNullable(),
     createdAt: p.datetime().onCreate(() => new Date()),
     updatedAt: p
       .datetime()

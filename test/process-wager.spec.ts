@@ -58,8 +58,184 @@ describe("ProcessWagerUseCase", () => {
 
     const verifyEm = db.orm.em.fork();
     const outboxRows = await verifyEm.find(OutboxMessageEntity, { aggregateId: walletId });
-    expect(outboxRows).toHaveLength(1);
-    expect(outboxRows[0].publishedAt).toBeNull();
+    expect(outboxRows).toHaveLength(2);
+    expect(outboxRows.map((row) => row.eventType).sort()).toEqual([
+      "WagerTransactionProcessed",
+      "WalletBalanceChanged",
+    ]);
+    expect(outboxRows.every((row) => row.publishedAt === null)).toBe(true);
+  });
+
+  it("processes LOSS without changing balance, version or ledger", async () => {
+    const walletId = await seedWallet(db, "player-loss-1", "100.00");
+    const beforeRepo = new MikroOrmWalletRepository(db.orm.em.fork());
+    const before = await beforeRepo.findById(walletId);
+    const beforeLedger = await beforeRepo.listLedgerEntries(walletId, { limit: 20 });
+
+    const result = await buildProcessWagerUseCase(db.orm.em.fork({ useContext: true })).execute({
+      externalTransactionId: "loss-1",
+      providerId: "provider-a",
+      idempotencyKey: "idem-loss-1",
+      payloadHash: "hash-loss-1",
+      playerId: "player-loss-1",
+      roundId: "round-loss-1",
+      gameId: "game-loss-1",
+      kind: "LOSS",
+      walletId,
+      amount: Money.from({ amount: "25.00", currency: "BRL" }),
+      referenceExternalTransactionId: null,
+    });
+
+    expect(result).toMatchObject({ status: "PROCESSED" });
+    const verifyRepo = new MikroOrmWalletRepository(db.orm.em.fork());
+    const after = await verifyRepo.findById(walletId);
+    const afterLedger = await verifyRepo.listLedgerEntries(walletId, { limit: 20 });
+    expect(after?.balance.toString()).toBe("100.00");
+    expect(after?.version).toBe(before?.version);
+    expect(afterLedger).toHaveLength(beforeLedger.length);
+
+    const outbox = await db.orm.em.fork().find(OutboxMessageEntity, { aggregateId: walletId });
+    expect(outbox.map((row) => row.eventType)).toEqual(["WagerTransactionProcessed"]);
+  });
+
+  it("rejects a reversal whose submitted amount differs from its reference", async () => {
+    const walletId = await seedWallet(db, "player-refund-amount", "100.00");
+    const common = { playerId: "player-refund-amount", roundId: "round-amount", gameId: "game-amount" };
+    await buildProcessWagerUseCase(db.orm.em.fork({ useContext: true })).execute({
+      ...common,
+      externalTransactionId: "bet-refund-amount",
+      providerId: "provider-a",
+      idempotencyKey: "idem-bet-refund-amount",
+      payloadHash: "hash-bet-refund-amount",
+      kind: "BET",
+      walletId,
+      amount: Money.from({ amount: "30.00", currency: "BRL" }),
+      referenceExternalTransactionId: null,
+    });
+    const refund = await buildProcessWagerUseCase(db.orm.em.fork({ useContext: true })).execute({
+      ...common,
+      externalTransactionId: "refund-wrong-amount",
+      providerId: "provider-a",
+      idempotencyKey: "idem-refund-wrong-amount",
+      payloadHash: "hash-refund-wrong-amount",
+      kind: "REFUND",
+      walletId,
+      amount: Money.from({ amount: "1.00", currency: "BRL" }),
+      referenceExternalTransactionId: "bet-refund-amount",
+    });
+    expect(refund).toMatchObject({ status: "REJECTED", failureCode: FailureCode.REVERSAL_AMOUNT_MISMATCH });
+    expect((await new MikroOrmWalletRepository(db.orm.em.fork()).findById(walletId))?.balance.toString()).toBe("70.00");
+  });
+
+  it("serializes two concurrent REFUNDs and credits the reference exactly once", async () => {
+    const walletId = await seedWallet(db, "player-refund-concurrent", "100.00");
+    const common = { playerId: "player-refund-concurrent", roundId: "round-concurrent", gameId: "game-concurrent" };
+    await buildProcessWagerUseCase(db.orm.em.fork({ useContext: true })).execute({
+      ...common,
+      externalTransactionId: "bet-concurrent-refund",
+      providerId: "provider-a",
+      idempotencyKey: "idem-bet-concurrent-refund",
+      payloadHash: "hash-bet-concurrent-refund",
+      kind: "BET",
+      walletId,
+      amount: Money.from({ amount: "30.00", currency: "BRL" }),
+      referenceExternalTransactionId: null,
+    });
+    const refundInput = (suffix: string) => ({
+      ...common,
+      externalTransactionId: `refund-concurrent-${suffix}`,
+      providerId: "provider-a",
+      idempotencyKey: `idem-refund-concurrent-${suffix}`,
+      payloadHash: `hash-refund-concurrent-${suffix}`,
+      kind: "REFUND" as const,
+      walletId,
+      amount: Money.from({ amount: "30.00", currency: "BRL" }),
+      referenceExternalTransactionId: "bet-concurrent-refund",
+    });
+    const results = await Promise.all([
+      buildProcessWagerUseCase(db.orm.em.fork({ useContext: true })).execute(refundInput("a")),
+      buildProcessWagerUseCase(db.orm.em.fork({ useContext: true })).execute(refundInput("b")),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual(["PROCESSED", "REJECTED"]);
+    expect((await new MikroOrmWalletRepository(db.orm.em.fork()).findById(walletId))?.balance.toString()).toBe("100.00");
+    const ledger = await new MikroOrmWalletRepository(db.orm.em.fork()).listLedgerEntries(walletId, { limit: 20 });
+    expect(ledger.filter((entry) => entry.direction === "CREDIT")).toHaveLength(2); // OPENING + one REFUND
+  });
+
+  it("rejects a reversal from a different round", async () => {
+    const walletId = await seedWallet(db, "player-round-mismatch", "100.00");
+    const useCase = () => buildProcessWagerUseCase(db.orm.em.fork({ useContext: true }));
+    await useCase().execute({
+      playerId: "player-round-mismatch",
+      roundId: "round-original",
+      gameId: "game-a",
+      externalTransactionId: "bet-round-mismatch",
+      providerId: "provider-a",
+      idempotencyKey: "idem-bet-round-mismatch",
+      payloadHash: "hash-bet-round-mismatch",
+      kind: "BET",
+      walletId,
+      amount: Money.from({ amount: "20.00", currency: "BRL" }),
+      referenceExternalTransactionId: null,
+    });
+    const result = await useCase().execute({
+      playerId: "player-round-mismatch",
+      roundId: "round-other",
+      gameId: "game-a",
+      externalTransactionId: "refund-round-mismatch",
+      providerId: "provider-a",
+      idempotencyKey: "idem-refund-round-mismatch",
+      payloadHash: "hash-refund-round-mismatch",
+      kind: "REFUND",
+      walletId,
+      amount: Money.from({ amount: "20.00", currency: "BRL" }),
+      referenceExternalTransactionId: "bet-round-mismatch",
+    });
+    expect(result).toMatchObject({ status: "REJECTED", failureCode: FailureCode.ROUND_MISMATCH });
+  });
+
+  it("uses a distinct failure code when rolling back a credit would make the balance negative", async () => {
+    const walletId = await seedWallet(db, "player-negative-rollback", "0.00");
+    const common = { playerId: "player-negative-rollback", roundId: "round-negative", gameId: "game-a" };
+    const useCase = () => buildProcessWagerUseCase(db.orm.em.fork({ useContext: true }));
+    await useCase().execute({
+      ...common,
+      externalTransactionId: "win-negative-rollback",
+      providerId: "provider-a",
+      idempotencyKey: "idem-win-negative-rollback",
+      payloadHash: "hash-win-negative-rollback",
+      kind: "WIN",
+      walletId,
+      amount: Money.from({ amount: "30.00", currency: "BRL" }),
+      referenceExternalTransactionId: null,
+    });
+    await useCase().execute({
+      ...common,
+      externalTransactionId: "bet-spends-win",
+      providerId: "provider-a",
+      idempotencyKey: "idem-bet-spends-win",
+      payloadHash: "hash-bet-spends-win",
+      kind: "BET",
+      walletId,
+      amount: Money.from({ amount: "30.00", currency: "BRL" }),
+      referenceExternalTransactionId: null,
+    });
+    const rollback = await useCase().execute({
+      ...common,
+      externalTransactionId: "rollback-negative",
+      providerId: "provider-a",
+      idempotencyKey: "idem-rollback-negative",
+      payloadHash: "hash-rollback-negative",
+      kind: "ROLLBACK",
+      walletId,
+      amount: Money.from({ amount: "30.00", currency: "BRL" }),
+      referenceExternalTransactionId: "win-negative-rollback",
+    });
+    expect(rollback).toMatchObject({
+      status: "REJECTED",
+      failureCode: FailureCode.REVERSAL_WOULD_MAKE_BALANCE_NEGATIVE,
+    });
+    expect((await new MikroOrmWalletRepository(db.orm.em.fork()).findById(walletId))?.balance.toString()).toBe("0.00");
   });
 
   it("rejects a BET with insufficient funds without touching the balance", async () => {

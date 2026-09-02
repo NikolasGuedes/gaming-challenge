@@ -40,6 +40,9 @@ export class WagerTransaction {
   private constructor(
     readonly id: string,
     readonly walletId: string,
+    readonly playerId: string,
+    readonly roundId: string,
+    readonly gameId: string,
     readonly externalTransactionId: string,
     readonly providerId: string,
     readonly idempotencyKey: string,
@@ -47,9 +50,14 @@ export class WagerTransaction {
     readonly kind: WagerKind,
     readonly amount: Money,
     readonly referenceExternalTransactionId: string | null,
+    readonly referenceTransactionId: string | null,
     readonly status: WagerStatus,
     readonly failureCode: FailureCode | null,
     readonly resultBalance: Money | null,
+    readonly processedAt: Date | null,
+    readonly referenceAttempts: number,
+    readonly nextReferenceAttemptAt: Date | null,
+    readonly referenceExpiresAt: Date | null,
     readonly createdAt: Date,
     readonly updatedAt: Date,
   ) {}
@@ -57,6 +65,9 @@ export class WagerTransaction {
   static create(input: {
     id: string;
     walletId: string;
+    playerId: string;
+    roundId: string;
+    gameId: string;
     externalTransactionId: string;
     providerId: string;
     idempotencyKey: string;
@@ -69,6 +80,9 @@ export class WagerTransaction {
     return new WagerTransaction(
       input.id,
       input.walletId,
+      input.playerId,
+      input.roundId,
+      input.gameId,
       input.externalTransactionId,
       input.providerId,
       input.idempotencyKey,
@@ -76,7 +90,12 @@ export class WagerTransaction {
       input.kind,
       input.amount,
       input.referenceExternalTransactionId,
+      null,
       "PENDING",
+      null,
+      null,
+      null,
+      0,
       null,
       null,
       now,
@@ -87,6 +106,9 @@ export class WagerTransaction {
   static rehydrate(input: {
     id: string;
     walletId: string;
+    playerId: string;
+    roundId: string;
+    gameId: string;
     externalTransactionId: string;
     providerId: string;
     idempotencyKey: string;
@@ -94,15 +116,23 @@ export class WagerTransaction {
     kind: WagerKind;
     amount: Money;
     referenceExternalTransactionId: string | null;
+    referenceTransactionId: string | null;
     status: WagerStatus;
     failureCode: FailureCode | null;
     resultBalance: Money | null;
+    processedAt: Date | null;
+    referenceAttempts: number;
+    nextReferenceAttemptAt: Date | null;
+    referenceExpiresAt: Date | null;
     createdAt: Date;
     updatedAt: Date;
   }): WagerTransaction {
     return new WagerTransaction(
       input.id,
       input.walletId,
+      input.playerId,
+      input.roundId,
+      input.gameId,
       input.externalTransactionId,
       input.providerId,
       input.idempotencyKey,
@@ -110,18 +140,35 @@ export class WagerTransaction {
       input.kind,
       input.amount,
       input.referenceExternalTransactionId,
+      input.referenceTransactionId,
       input.status,
       input.failureCode,
       input.resultBalance,
+      input.processedAt,
+      input.referenceAttempts,
+      input.nextReferenceAttemptAt,
+      input.referenceExpiresAt,
       input.createdAt,
       input.updatedAt,
     );
   }
 
-  private with(patch: Partial<{ status: WagerStatus; failureCode: FailureCode | null; resultBalance: Money | null }>): WagerTransaction {
+  private with(patch: Partial<{
+    status: WagerStatus;
+    failureCode: FailureCode | null;
+    resultBalance: Money | null;
+    referenceTransactionId: string | null;
+    processedAt: Date | null;
+    referenceAttempts: number;
+    nextReferenceAttemptAt: Date | null;
+    referenceExpiresAt: Date | null;
+  }>): WagerTransaction {
     return new WagerTransaction(
       this.id,
       this.walletId,
+      this.playerId,
+      this.roundId,
+      this.gameId,
       this.externalTransactionId,
       this.providerId,
       this.idempotencyKey,
@@ -129,23 +176,50 @@ export class WagerTransaction {
       this.kind,
       this.amount,
       this.referenceExternalTransactionId,
+      patch.referenceTransactionId !== undefined ? patch.referenceTransactionId : this.referenceTransactionId,
       patch.status ?? this.status,
       patch.failureCode !== undefined ? patch.failureCode : this.failureCode,
       patch.resultBalance !== undefined ? patch.resultBalance : this.resultBalance,
+      patch.processedAt !== undefined ? patch.processedAt : this.processedAt,
+      patch.referenceAttempts ?? this.referenceAttempts,
+      patch.nextReferenceAttemptAt !== undefined ? patch.nextReferenceAttemptAt : this.nextReferenceAttemptAt,
+      patch.referenceExpiresAt !== undefined ? patch.referenceExpiresAt : this.referenceExpiresAt,
       this.createdAt,
       new Date(),
     );
   }
 
-  markProcessed(resultBalance: Money): WagerTransaction {
-    return this.with({ status: "PROCESSED", failureCode: null, resultBalance });
+  markProcessed(resultBalance: Money, referenceTransactionId: string | null = null): WagerTransaction {
+    return this.with({
+      status: "PROCESSED",
+      failureCode: null,
+      resultBalance,
+      referenceTransactionId,
+      processedAt: new Date(),
+    });
   }
 
   markRejected(failureCode: FailureCode): WagerTransaction {
-    return this.with({ status: "REJECTED", failureCode, resultBalance: null });
+    return this.with({ status: "REJECTED", failureCode, resultBalance: null, processedAt: new Date() });
   }
 
   markPendingReference(): WagerTransaction {
-    return this.with({ status: "PENDING_REFERENCE" });
+    const now = new Date();
+    return this.with({
+      status: "PENDING_REFERENCE",
+      referenceAttempts: 0,
+      nextReferenceAttemptAt: new Date(now.getTime() + 1_000),
+      referenceExpiresAt: new Date(now.getTime() + 5 * 60_000),
+    });
+  }
+
+  scheduleReferenceRetry(now: Date): WagerTransaction {
+    const attempts = this.referenceAttempts + 1;
+    const delayMs = Math.min(2 ** attempts, 30) * 1_000;
+    return this.with({ referenceAttempts: attempts, nextReferenceAttemptAt: new Date(now.getTime() + delayMs) });
+  }
+
+  hasExhaustedReferenceRetries(now: Date, maxAttempts = 5): boolean {
+    return this.referenceAttempts + 1 >= maxAttempts || (this.referenceExpiresAt !== null && this.referenceExpiresAt <= now);
   }
 }

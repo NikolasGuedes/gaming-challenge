@@ -26,4 +26,6 @@ export interface OutboxRepository {
   processDueBatch(limit: number, publish: (message: OutboxMessageRecord) => Promise<boolean>): Promise<number>;
 }
 
+export type NewOutboxMessage = Parameters<OutboxRepository["append"]>[0];
+
 export const OUTBOX_REPOSITORY = Symbol("OUTBOX_REPOSITORY");

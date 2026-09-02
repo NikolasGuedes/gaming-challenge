@@ -6,8 +6,10 @@ import { MikroOrmWalletRepository } from "./infrastructure/persistence/repositor
 import { WalletController } from "./infrastructure/http/wallet.controller.js";
 import { WAGER_TRANSACTION_REPOSITORY } from "../wagering/application/ports/wager-transaction.repository.js";
 import { MikroOrmWagerTransactionRepository } from "../wagering/infrastructure/persistence/repositories/wager-transaction.repository.js";
+import { MessagingModule } from "../messaging/messaging.module.js";
 
 @Module({
+  imports: [MessagingModule],
   controllers: [WalletController],
   providers: [
     CreateWalletUseCase,

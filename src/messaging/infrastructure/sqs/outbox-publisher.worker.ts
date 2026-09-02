@@ -10,7 +10,7 @@ const BATCH_SIZE = 10;
 @Injectable()
 export class OutboxPublisherWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OutboxPublisherWorker.name);
-  private readonly queueUrl = process.env.SQS_QUEUE_URL ?? "";
+  private readonly queueUrl = process.env.SQS_EVENTS_QUEUE_URL ?? process.env.SQS_QUEUE_URL ?? "";
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
 
@@ -21,7 +21,7 @@ export class OutboxPublisherWorker implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit(): void {
     if (!this.queueUrl) {
-      this.logger.warn("SQS_QUEUE_URL not set — outbox publisher disabled");
+      this.logger.warn("SQS_EVENTS_QUEUE_URL not set — outbox publisher disabled");
       return;
     }
     this.timer = setInterval(() => {
@@ -47,12 +47,16 @@ export class OutboxPublisherWorker implements OnModuleInit, OnModuleDestroy {
           await this.sqsClient.send(
             new SendMessageCommand({
               QueueUrl: this.queueUrl,
-              MessageBody: JSON.stringify({
-                eventType: message.eventType,
-                aggregateId: message.aggregateId,
-                occurredAt: message.occurredAt,
-                payload: message.payload,
-              }),
+              MessageBody: JSON.stringify(
+                typeof message.payload === "object" && message.payload !== null && "eventType" in message.payload
+                  ? message.payload
+                  : {
+                      eventType: message.eventType,
+                      aggregateId: message.aggregateId,
+                      occurredAt: message.occurredAt,
+                      payload: message.payload,
+                    },
+              ),
               MessageGroupId: message.aggregateId,
               MessageDeduplicationId: message.id,
             }),

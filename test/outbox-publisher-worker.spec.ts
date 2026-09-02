@@ -25,6 +25,7 @@ describe("OutboxPublisherWorker", () => {
     });
     ({ mainQueueUrl: queueUrl } = await bootstrapQueues(sqsClient));
     process.env.SQS_QUEUE_URL = queueUrl;
+    process.env.SQS_EVENTS_QUEUE_URL = queueUrl;
   }, 90_000);
 
   afterAll(async () => {

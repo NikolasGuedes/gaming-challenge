@@ -31,8 +31,9 @@ feito — não é necessário pro que este serviço se propõe a garantir.
   a aritmética intermediária do ledger nunca perca precisão.
   `NUMERIC(19,2)` também atenderia a especificação; a escala extra foi uma
   escolha defensiva, não uma exigência.
-- **AWS SQS via LocalStack** — `wager-transactions.fifo` /
-  `wager-transactions-dlq.fifo` (nomes definidos na especificação).
+- **AWS SQS via LocalStack** — `wager-transactions.fifo` para comandos de
+  entrada, `wager-transactions-dlq.fifo` para falhas após as tentativas do
+  consumer e `wager-events.fifo` para eventos publicados pelo outbox.
 - **decimal.js** — sustenta o value object `Money`.
 - **Testcontainers** — Postgres e LocalStack reais nos testes de
   integração, nunca mockados. O módulo do LocalStack de fato instalado
@@ -60,15 +61,13 @@ insuficiente e conflito de moeda são **modelados como resultado**
 fluxo de negócio esperado, não excepcional.
 
 `REFUND` só pode referenciar um `BET`; `ROLLBACK` pode referenciar `BET`,
-`WIN` ou `REFUND`. Uma reversão cuja referência ainda não chegou (ou ainda
-não terminou de processar) fica armazenada como `PENDING_REFERENCE` — não
-é rejeitada. Ela resolve **de forma síncrona**, dentro da mesma transação
-SQL que finalmente processa a transação referenciada (sem worker de
-polling separado com backoff). É uma simplificação deliberada: se a
-transação referenciada nunca chegar, a reversão fica `PENDING_REFERENCE`
-indefinidamente. Um sistema de produção adicionaria uma varredura de
-TTL/expiração; este aqui documenta a lacuna em vez de construí-la, conforme
-a decisão de escopo acima.
+`WIN` ou `REFUND`. Provider, player, wallet, moeda, rodada e valor precisam
+coincidir com a referência. Uma reversão cuja referência ainda não chegou
+(ou ainda não terminou de processar) fica armazenada como
+`PENDING_REFERENCE` — não é rejeitada imediatamente. Ela pode resolver
+sincronamente quando a referência chega; um worker também varre as linhas
+vencidas, usa backoff exponencial e, após cinco tentativas ou cinco minutos,
+rejeita com `REFERENCE_NOT_FOUND`.
 
 ## Concorrência
 
@@ -97,18 +96,20 @@ corrigida durante a implementação em vez de antecipada de antemão: nada
 originalmente impedia que dois `REFUND`s *diferentes* referenciassem o
 mesmo `BET` já processado e ambos creditassem a wallet — cada requisição,
 isolada, parecia uma reversão nova e válida. A correção é o
-`FailureCode.REFERENCE_ALREADY_REVERSED`: antes de creditar, o use case
-chama
+`FailureCode.REFERENCE_ALREADY_REVERSED`: depois de adquirir o lock da
+wallet, o use case chama
 `WagerTransactionRepository.findProcessedReversalFor(providerId, externalTransactionId)`
 e rejeita uma segunda reversão de uma referência que já tem uma processada
-contra ela. Isso já está implementado e testado, não é uma lacuna
-documentada — mas veja a race residual anotada em Limitações conhecidas.
+contra ela. Um índice único parcial sobre `reference_transaction_id` para
+reversões processadas é a última linha de defesa no schema. O cenário de
+dois `REFUND`s simultâneos está coberto por teste de integração.
 
 Os dois caminhos de reversão — o direto acima e o
 `resolvePendingReferences`, que aplica reversões que chegaram *antes* da
 transação que elas revertem — passam toda regra de reversão pelo mesmo
-helper compartilhado `reversalRejection()`, então não podem divergir. Três
-regras vivem ali: a checagem de kind da referência, a checagem de
+helper compartilhado `reversalRejection()`, então não podem divergir. As
+regras vivem ali: a checagem de kind da referência, escopo completo
+(provider, player, wallet, moeda e rodada), igualdade do valor e a checagem de
 já-revertido (no caminho pendente isso é uma flag local que vira `true`
 assim que uma reversão é creditada, porque uma linha marcada como
 processada mais cedo no mesmo loop ainda não está visível numa
@@ -163,9 +164,15 @@ A linha do outbox é gravada na mesma transação SQL do ledger — nunca
 publicada antes do commit. Um `OutboxPublisherWorker` separado (um por
 instância da app, todos rodando o mesmo código) faz polling com
 `SELECT ... FOR UPDATE SKIP LOCKED`, então N instâncias de publisher nunca
-disputam a mesma linha. Backoff em falha de publicação é um delay fixo,
-não uma curva exponencial — mais simples de raciocinar, suficiente pra
-esse escopo.
+disputam a mesma linha. Uma falha deixa a linha disponível para uma
+tentativa posterior. O evento vai para `wager-events.fifo`, nunca para a
+fila de comandos consumida pela própria aplicação.
+
+Os eventos usam um envelope `IntegrationEvent<T>` com `eventId`,
+`eventType`, `aggregateId`, `correlationId`, `causationId`, `occurredAt`,
+`version` e `data`. Os tipos publicados são
+`WagerTransactionProcessed`, `WagerTransactionRejected`,
+`WagerTransactionPendingReference` e `WalletBalanceChanged`.
 
 O consumer SQS e o controller HTTP chamam exatamente o mesmo
 `ProcessWagerUseCase` (exigência explícita, spec §10) — nenhuma regra de
@@ -196,7 +203,8 @@ garantido no Postgres, não só em código de aplicação:
 
 - `wallets`: `CHECK (balance >= 0)`, `UNIQUE (player_id, currency)`.
 - `wager_transactions`: `UNIQUE (idempotency_key)`,
-  `UNIQUE (provider_id, external_transaction_id)`.
+  `UNIQUE (provider_id, external_transaction_id)` e índice único parcial
+  garantindo uma única reversão processada por `reference_transaction_id`.
 - `wallet_ledger_entries`: `UNIQUE (wallet_id, transaction_id)`, e um
   trigger (`prevent_ledger_mutation`) que levanta erro em qualquer
   `UPDATE`/`DELETE` — o ledger é append-only a nível de banco, não por
@@ -221,11 +229,11 @@ de qualquer forma.
 
 ## Observabilidade
 
-`Logger` padrão do NestJS — não o log estruturado em JSON com campos
-`correlationId`/`messageId`/`transactionId`/`walletId`/`providerId`
-descrito no spec original. Conectar um logger estruturado (ex: pino) foi
-cortado pra manter o escopo pequeno; é um follow-up mecânico, não uma
-lacuna de design. Também não tem stack de métricas Prometheus/Grafana.
+O bootstrap instala um logger JSON compatível com o `LoggerService` do
+NestJS. Contextos fornecidos pela aplicação, incluindo `messageId`,
+`transactionId`, `walletId`, `providerId` e identificadores de correlação,
+são serializados como campos pesquisáveis. Não há stack de métricas
+Prometheus/Grafana.
 Contagem de transações, profundidade da DLQ e lag do outbox são
 respondidos com uma query SQL contra `wager_transactions`/`outbox_messages`,
 documentada aqui em vez de conectada a um dashboard:
@@ -295,68 +303,16 @@ group by status;
 
 ## Limitações conhecidas
 
-- **`OutboxPublisherWorker` e `WagerTransactionConsumer` leem os dois de
-  `SQS_QUEUE_URL`** — ou seja, a mesma fila física `wager-transactions.fifo`
-  é usada tanto pras submissões de aposta de entrada (o que o consumer foi
-  construído pra parsear) quanto pros eventos de domínio `WagerProcessed`
-  de saída (o que o publisher escreve ali a partir do outbox). Verificado
-  de ponta a ponta contra a stack completa do docker-compose: um
-  `OPENING` e um `BET` foram processados corretamente via HTTP, e cada um
-  gerou uma linha de outbox que o publisher devidamente entregou em
-  `wager-transactions.fifo` — que o consumer então pegou de volta e
-  reconheceu como não sendo uma submissão de aposta. O consumer valida
-  `envelope.type` antes de tocar em `envelope.data`, então o loop-back
-  hoje é um único `logger.warn` (`message <id> skipped — unexpected
-  envelope type undefined (not a wager transaction request)`) seguido de
-  um delete-e-retorno imediato: a mensagem recebe ack no primeiro
-  recebimento, nunca é tentada de novo, e nunca é redirecionada pra DLQ.
-  Nenhuma transação de banco é aberta pra ela, então não tem nada pra dar
-  rollback. O que sobra é ruído de log em toda transação processada, mais
-  a lacuna funcional real: nenhum consumidor externo das notificações
-  `WagerProcessed` é utilizável de forma realista hoje, já que a mesma
-  fila imediatamente descarta suas próprias mensagens publicadas. Corrigir
-  isso direito precisa ou de uma segunda fila pras notificações de saída,
-  ou de uma routing key que deixe um subscriber de verdade pegá-las —
-  nenhuma das duas foi implementada; as duas filas especificadas
-  (`wager-transactions.fifo` / DLQ) são usadas exatamente como nomeadas,
-  só pro processamento de entrada. Aceito como fora de escopo — o foco
-  aqui é corretude de processamento, não entrega de evento de saída.
-- `PENDING_REFERENCE` não tem expiração — uma reversão referenciando uma
-  transação que nunca chega fica pendente pra sempre.
 - Cadeias transitivas de referência pendente (profundidade maior que um)
   não resolvem — ex: um `ROLLBACK` referenciando um `REFUND` que ainda
   estava `PENDING_REFERENCE` na hora. `resolvePendingReferences` só olha
   um nível de profundidade: resolve reversões que referenciam diretamente
-  a transação recém-processada, não reversões-de-reversões. Aceito pelo
-  mesmo motivo do item acima — mesma classe de lacuna, mesma decisão de
-  escopo.
-- O guard de dupla-reversão (`FailureCode.REFERENCE_ALREADY_REVERSED`)
-  tem uma race residual do tipo TOCTOU sob concorrência real:
-  `findProcessedReversalFor` é consultado *antes* do lock da linha da
-  wallet ser adquirido, então dois `REFUND`s genuinamente concorrentes do
-  mesmo `BET` poderiam, em teoria, ambos passar pela checagem antes de
-  qualquer um commitar. Diferente do dedup de `(provider_id,
-  external_transaction_id)` — que tem uma unique constraint a nível de
-  banco como último recurso mesmo se a checagem de aplicação perder a
-  race — não existe um índice único parcial equivalente cobrindo esse
-  caso. Aceito: esse cenário não é um dos cenários de concorrência
-  obrigatórios cobertos pela suite de testes, e fechar isso por completo
-  precisaria ou de
-  ordenação de lock mais estrita ou de um índice único em "reversão
-  processada por transação referenciada", o que fica como trabalho futuro
-  se isso for endurecido mais.
-- O `amount` armazenado numa transação `REFUND`/`ROLLBACK` reflete o que
-  quem chamou alegou, não necessariamente o que foi de fato revertido — o
-  efeito real na wallet sempre usa o amount da transação *referenciada*
-  (a fonte de verdade), mas nenhuma falha `REVERSAL_AMOUNT_MISMATCH` é
-  levantada se os dois divergirem. Uma versão mais rígida compararia e
-  rejeitaria.
+  a transação recém-processada, não reversões-de-reversões. O worker pode
+  retomá-las em ciclos posteriores, mas não há garantia de resolução de uma
+  cadeia arbitrariamente profunda dentro de uma única transação.
 - Nenhum teste de carga foi feito — fora de escopo pro que este serviço
   precisa garantir.
 - Sem stack de métricas/dashboard — queries SQL fazem esse papel.
-- Logs são o `Logger` padrão do NestJS, não estruturados em JSON com
-  campos `correlationId`/`messageId`/etc como esboçado originalmente — um
-  follow-up mecânico, não uma lacuna de design.
 - Os testes de concorrência de ≥3 instâncias usam `EntityManager`
   forkados concorrentes num único processo em vez de containers
   separados (veja a seção Concorrência acima).

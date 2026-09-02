@@ -23,9 +23,10 @@ describe("bootstrapQueues", () => {
   });
 
   it("creates the main FIFO queue with a redrive policy pointing at the DLQ", async () => {
-    const { mainQueueUrl, dlqUrl } = await bootstrapQueues(client);
+    const { mainQueueUrl, dlqUrl, eventsQueueUrl } = await bootstrapQueues(client);
     expect(mainQueueUrl).toContain("wager-transactions.fifo");
     expect(dlqUrl).toContain("wager-transactions-dlq.fifo");
+    expect(eventsQueueUrl).toContain("wager-events.fifo");
 
     const attrs = await client.send(
       new GetQueueAttributesCommand({ QueueUrl: mainQueueUrl, AttributeNames: ["RedrivePolicy"] }),

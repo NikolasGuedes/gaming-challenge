@@ -8,7 +8,9 @@ import {
   NotFoundException,
   Param,
   Post,
+  Res,
 } from "@nestjs/common";
+import type { Response } from "express";
 import { Money } from "../../../shared-kernel/money.js";
 import { computePayloadHash } from "../../domain/payload-hash.js";
 import { ProcessWagerUseCase, ProcessWagerResult } from "../../application/use-cases/process-wager.use-case.js";
@@ -34,6 +36,7 @@ export class WageringController {
   async submit(
     @Headers("idempotency-key") idempotencyKey: string | undefined,
     @Body() dto: SubmitWagerDto,
+    @Res({ passthrough: true }) httpResponse?: Response,
   ): Promise<WagerResponseDto> {
     if (!idempotencyKey) {
       throw new BadRequestException("Idempotency-Key header is required");
@@ -43,9 +46,11 @@ export class WageringController {
       externalTransactionId: dto.externalTransactionId,
       providerId: dto.providerId,
       walletId: dto.walletId,
+      playerId: dto.playerId,
+      roundId: dto.roundId,
+      gameId: dto.gameId,
       kind: dto.kind,
-      amount: dto.amount,
-      currency: dto.currency,
+      money: dto.money,
       referenceExternalTransactionId: dto.referenceExternalTransactionId ?? null,
     };
     const payloadHash = computePayloadHash(businessFields);
@@ -62,18 +67,23 @@ export class WageringController {
         const result = await this.processWagerUseCase.execute({
           externalTransactionId: dto.externalTransactionId,
           providerId: dto.providerId,
+          playerId: dto.playerId,
+          roundId: dto.roundId,
+          gameId: dto.gameId,
           idempotencyKey,
           payloadHash,
           kind: dto.kind,
           walletId: dto.walletId,
-          amount: Money.from({ amount: dto.amount, currency: dto.currency }),
+          amount: Money.from(dto.money),
           referenceExternalTransactionId: dto.referenceExternalTransactionId ?? null,
         });
         return toWagerResponseDto(result, result.idempotentReplay);
       },
     );
 
-    return { ...response, idempotentReplay: idempotentReplay || response.idempotentReplay };
+    const replay = idempotentReplay || response.idempotentReplay;
+    httpResponse?.status(replay ? 200 : response.status === "PENDING_REFERENCE" ? 202 : response.status === "REJECTED" ? 422 : 201);
+    return { ...response, idempotentReplay: replay };
   }
 
   @Get("wagering/transactions/:transactionId")

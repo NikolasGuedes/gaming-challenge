@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable } from "@nestjs/common";
+import { ConflictException, Inject, Injectable, Optional } from "@nestjs/common";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { Money } from "../../../shared-kernel/money.js";
 import { computePayloadHash } from "../../../wagering/domain/payload-hash.js";
@@ -8,6 +8,8 @@ import {
   type WagerTransactionRepository,
 } from "../../../wagering/application/ports/wager-transaction.repository.js";
 import { Wallet } from "../../domain/wallet.js";
+import { OUTBOX_REPOSITORY, type OutboxRepository } from "../../../messaging/application/ports/outbox.repository.js";
+import { WagerTransactionProcessed, WalletBalanceChanged } from "../../../wagering/domain/wager-events.js";
 import { WALLET_REPOSITORY, type WalletRepository } from "../ports/wallet.repository.js";
 
 @Injectable()
@@ -17,6 +19,8 @@ export class CreateWalletUseCase {
     @Inject(WALLET_REPOSITORY) private readonly walletRepository: WalletRepository,
     @Inject(WAGER_TRANSACTION_REPOSITORY)
     private readonly wagerTransactionRepository: WagerTransactionRepository,
+    @Optional() @Inject(OUTBOX_REPOSITORY)
+    private readonly outboxRepository?: OutboxRepository,
   ) {}
 
   async execute(input: { playerId: string; currency: string; initialBalance: Money }): Promise<Wallet> {
@@ -51,6 +55,9 @@ export class CreateWalletUseCase {
         const openingTx = WagerTransaction.create({
           id: openingTransactionId,
           walletId,
+          playerId: input.playerId,
+          roundId: "internal-opening",
+          gameId: "internal-opening",
           externalTransactionId: `opening-${walletId}`,
           providerId: "internal",
           idempotencyKey: `opening-${walletId}`,
@@ -63,6 +70,48 @@ export class CreateWalletUseCase {
         await this.em.flush();
 
         await this.walletRepository.appendLedgerEntry(openingEntry);
+
+        if (this.outboxRepository) {
+          const processedEvent = new WagerTransactionProcessed({
+            aggregateId: wallet.id,
+            correlationId: openingTx.idempotencyKey,
+            data: {
+              transactionId: openingTx.id,
+              walletId: wallet.id,
+              playerId: wallet.playerId,
+              providerId: "internal",
+              externalTransactionId: openingTx.externalTransactionId,
+              roundId: openingTx.roundId,
+              gameId: openingTx.gameId,
+              kind: "OPENING",
+              money: openingTx.amount.toJSON(),
+              balance: wallet.balance.toJSON(),
+            },
+          });
+          const balanceEvent = new WalletBalanceChanged({
+            aggregateId: wallet.id,
+            correlationId: openingTx.idempotencyKey,
+            causationId: openingTx.id,
+            data: {
+              walletId: wallet.id,
+              transactionId: openingTx.id,
+              direction: openingEntry.direction,
+              money: openingEntry.amount.toJSON(),
+              balanceBefore: openingEntry.balanceBefore.toJSON(),
+              balanceAfter: openingEntry.balanceAfter.toJSON(),
+              walletVersion: wallet.version,
+            },
+          });
+          for (const event of [processedEvent, balanceEvent]) {
+            await this.outboxRepository.append({
+              id: event.eventId,
+              aggregateId: event.aggregateId,
+              eventType: event.eventType,
+              payload: event.toJSON(),
+              occurredAt: event.occurredAt,
+            });
+          }
+        }
       }
 
       return wallet;

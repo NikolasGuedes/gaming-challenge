@@ -7,7 +7,7 @@ import { createSqsClient } from "./sqs-client.provider.js";
 
 export async function bootstrapQueues(
   client: SQSClient,
-): Promise<{ mainQueueUrl: string; dlqUrl: string }> {
+): Promise<{ mainQueueUrl: string; dlqUrl: string; eventsQueueUrl: string }> {
   const dlq = await client.send(
     new CreateQueueCommand({
       QueueName: "wager-transactions-dlq.fifo",
@@ -33,14 +33,22 @@ export async function bootstrapQueues(
     }),
   );
 
-  return { mainQueueUrl: main.QueueUrl!, dlqUrl };
+  const events = await client.send(
+    new CreateQueueCommand({
+      QueueName: "wager-events.fifo",
+      Attributes: { FifoQueue: "true", ContentBasedDeduplication: "false" },
+    }),
+  );
+
+  return { mainQueueUrl: main.QueueUrl!, dlqUrl, eventsQueueUrl: events.QueueUrl! };
 }
 
 if (import.meta.main) {
   bootstrapQueues(createSqsClient())
-    .then(({ mainQueueUrl, dlqUrl }) => {
+    .then(({ mainQueueUrl, dlqUrl, eventsQueueUrl }) => {
       console.log(`Main queue: ${mainQueueUrl}`);
       console.log(`DLQ: ${dlqUrl}`);
+      console.log(`Events queue: ${eventsQueueUrl}`);
     })
     .catch((err) => {
       console.error(err);

@@ -1,11 +1,11 @@
-import { Body, Controller, Get, Inject, NotFoundException, Param, Post, Query } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, HttpCode, Inject, NotFoundException, Param, Post, Query } from "@nestjs/common";
 import { Money } from "../../../shared-kernel/money.js";
 import { CreateWalletUseCase } from "../../application/use-cases/create-wallet.use-case.js";
 import { ReconcileWalletUseCase } from "../../application/use-cases/reconcile-wallet.use-case.js";
 import { WALLET_REPOSITORY, type WalletRepository } from "../../application/ports/wallet.repository.js";
 import { CreateWalletDto } from "./dto/create-wallet.dto.js";
 import { toWalletResponseDto, WalletResponseDto } from "./dto/wallet-response.dto.js";
-import { toLedgerResponseDto, LedgerResponseDto } from "./dto/ledger-response.dto.js";
+import { decodeLedgerCursor, toLedgerResponseDto, LedgerResponseDto } from "./dto/ledger-response.dto.js";
 import { toReconciliationResponseDto, ReconciliationResponseDto } from "./dto/reconciliation-response.dto.js";
 
 @Controller("wallets")
@@ -18,10 +18,10 @@ export class WalletController {
 
   @Post()
   async create(@Body() dto: CreateWalletDto): Promise<WalletResponseDto> {
-    const initialBalance = Money.from({ amount: dto.initialBalance ?? "0.00", currency: dto.currency });
+    const initialBalance = Money.from(dto.initialBalance);
     const wallet = await this.createWalletUseCase.execute({
       playerId: dto.playerId,
-      currency: dto.currency,
+      currency: dto.initialBalance.currency,
       initialBalance,
     });
     return toWalletResponseDto(wallet);
@@ -39,15 +39,22 @@ export class WalletController {
   @Get(":walletId/ledger")
   async getLedger(
     @Param("walletId") walletId: string,
-    @Query("after") after?: string,
+    @Query("cursor") cursor?: string,
     @Query("limit") limit?: string,
   ): Promise<LedgerResponseDto> {
     const parsedLimit = limit ? Math.min(Math.max(parseInt(limit, 10), 1), 100) : 20;
+    let after: { createdAt: Date; id: string } | undefined;
+    try {
+      after = cursor ? decodeLedgerCursor(cursor) : undefined;
+    } catch {
+      throw new BadRequestException("Invalid ledger cursor");
+    }
     const entries = await this.walletRepository.listLedgerEntries(walletId, { after, limit: parsedLimit });
     return toLedgerResponseDto(entries, parsedLimit);
   }
 
   @Post(":walletId/reconciliation")
+  @HttpCode(200)
   async reconcile(@Param("walletId") walletId: string): Promise<ReconciliationResponseDto> {
     const result = await this.reconcileWalletUseCase.execute(walletId);
     return toReconciliationResponseDto(result);

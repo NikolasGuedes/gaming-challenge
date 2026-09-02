@@ -6,6 +6,7 @@ import { MikroOrmOutboxRepository } from "./infrastructure/persistence/repositor
 import { MikroOrmInboxRepository } from "./infrastructure/persistence/repositories/inbox.repository.js";
 import { WagerTransactionConsumer } from "./infrastructure/sqs/wager-transaction.consumer.js";
 import { OutboxPublisherWorker } from "./infrastructure/sqs/outbox-publisher.worker.js";
+import { PendingReferenceWorker } from "./infrastructure/sqs/pending-reference.worker.js";
 
 @Module({
   providers: [
@@ -14,6 +15,7 @@ import { OutboxPublisherWorker } from "./infrastructure/sqs/outbox-publisher.wor
     { provide: INBOX_REPOSITORY, useClass: MikroOrmInboxRepository },
     WagerTransactionConsumer,
     OutboxPublisherWorker,
+    PendingReferenceWorker,
   ],
   exports: [OUTBOX_REPOSITORY, SQS_CLIENT],
 })

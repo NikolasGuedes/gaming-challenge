@@ -26,6 +26,9 @@ describe("MikroOrmWagerTransactionRepository — DB-level uniqueness", () => {
     const first = WagerTransaction.create({
       id: "44444444-4444-4444-4444-444444444444",
       walletId: "33333333-3333-3333-3333-333333333333",
+      playerId: "player-x",
+      roundId: "round-1",
+      gameId: "game-1",
       externalTransactionId: "bet-1",
       providerId: "provider-a",
       idempotencyKey: "idem-1",
@@ -40,6 +43,9 @@ describe("MikroOrmWagerTransactionRepository — DB-level uniqueness", () => {
     const duplicate = WagerTransaction.create({
       id: "55555555-5555-5555-5555-555555555555",
       walletId: "33333333-3333-3333-3333-333333333333",
+      playerId: "player-x",
+      roundId: "round-1",
+      gameId: "game-1",
       externalTransactionId: "bet-1", // same provider + external id
       providerId: "provider-a",
       idempotencyKey: "idem-2",

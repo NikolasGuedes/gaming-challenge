@@ -43,12 +43,20 @@ export class MikroOrmWalletRepository implements WalletRepository {
 
   async listLedgerEntries(
     walletId: string,
-    cursor: { after?: string; limit: number },
+    cursor: { after?: { createdAt: Date; id: string }; limit: number },
   ): Promise<WalletLedgerEntry[]> {
     const entities = await this.em.find(
       WalletLedgerEntryEntity,
-      cursor.after ? { walletId, id: { $gt: cursor.after } } : { walletId },
-      { orderBy: { id: "asc" }, limit: cursor.limit },
+      cursor.after
+        ? {
+            walletId,
+            $or: [
+              { createdAt: { $gt: cursor.after.createdAt } },
+              { createdAt: cursor.after.createdAt, id: { $gt: cursor.after.id } },
+            ],
+          }
+        : { walletId },
+      { orderBy: { createdAt: "asc", id: "asc" }, limit: cursor.limit },
     );
     return entities.map(WalletLedgerEntryMapper.toDomain);
   }

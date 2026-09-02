@@ -27,7 +27,7 @@ describe('End-to-end smoke test (requires `docker compose up -d`)', () => {
     const playerId = `player-e2e-${Date.now()}`;
     const createResponse = await request(app.getHttpServer())
       .post('/wallets')
-      .send({ playerId, currency: 'BRL', initialBalance: '100.00' })
+      .send({ playerId, initialBalance: { amount: '100.00', currency: 'BRL' } })
       .expect(201);
 
     const walletId = createResponse.body.id;
@@ -38,10 +38,12 @@ describe('End-to-end smoke test (requires `docker compose up -d`)', () => {
       .send({
         externalTransactionId: `bet-e2e-${walletId}`,
         providerId: 'provider-e2e',
+        playerId,
         walletId,
+        roundId: 'round-e2e',
+        gameId: 'game-e2e',
         kind: 'BET',
-        amount: '40.00',
-        currency: 'BRL',
+        money: { amount: '40.00', currency: 'BRL' },
       })
       .expect(201);
 

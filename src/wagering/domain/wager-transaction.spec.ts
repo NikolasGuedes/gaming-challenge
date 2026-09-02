@@ -38,6 +38,9 @@ describe("WagerTransaction", () => {
   const baseInput = {
     id: "tx-1",
     walletId: "wallet-1",
+    playerId: "player-1",
+    roundId: "round-1",
+    gameId: "game-1",
     externalTransactionId: "ext-1",
     providerId: "provider-a",
     idempotencyKey: "idem-1",

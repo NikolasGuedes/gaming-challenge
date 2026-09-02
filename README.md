@@ -46,7 +46,7 @@ docker compose up -d     # stack completa incluindo o container da app
 
 `.env` aponta pra `localhost`, o que é correto pra rodar direto no host mas
 errado dentro de um container; `docker-compose.yml` sobrescreve
-`DATABASE_URL`, `AWS_ENDPOINT_URL` e as duas URLs de fila do serviço `app`
+`DATABASE_URL`, `AWS_ENDPOINT_URL` e as três URLs de fila do serviço `app`
 pros nomes dos serviços do compose (`postgres`, `localstack`), então não
 precisa editar o `.env` pra rodar `docker compose up -d`. Migrations e
 bootstrap das filas ainda rodam pelo host (veja Setup) — o container da app
@@ -75,10 +75,9 @@ bun run typecheck          # tsc --noEmit sobre src/ + test/ (specs incluídos)
 bun run lint
 ```
 
-Tudo verde até esta task: `bun test test/ src` → **67 passando, 0 falhando**
-em 18 arquivos, incluindo todo cenário obrigatório de concorrência
-(contenção de hot-wallet, 3+ instâncias concorrentes,
-replay de 50 requisições duplicadas em paralelo), além de `bun run
+O conjunto cobre testes unitários, integração e concorrência, incluindo
+contenção de hot-wallet, 3+ instâncias concorrentes e
+replay de 50 requisições duplicadas em paralelo, além de `bun run
 typecheck` e `bun run lint` limpos.
 
 `test/e2e-smoke.spec.ts` e o caso de sucesso do `/health/ready` em
@@ -90,9 +89,9 @@ migrations e faz o bootstrap das filas (veja Setup) antes de rodá-los.
 
 | Método | Path | Propósito |
 |---|---|---|
-| POST | `/wallets` | Abre uma wallet (saldo inicial opcional → transação `OPENING`) |
+| POST | `/wallets` | Abre uma wallet (saldo inicial → transação `OPENING`) |
 | GET | `/wallets/:walletId` | Estado da wallet |
-| GET | `/wallets/:walletId/ledger` | Ledger paginado (`?after=&limit=`) |
+| GET | `/wallets/:walletId/ledger` | Ledger paginado (`?cursor=&limit=`; cursor opaco) |
 | POST | `/wallets/:walletId/reconciliation` | Recalcula o saldo a partir do ledger, somente leitura |
 | POST | `/wagering/transactions` | Submete BET/WIN/LOSS/REFUND/ROLLBACK (header `Idempotency-Key` obrigatório) |
 | GET | `/wagering/transactions/:transactionId` | Busca uma transação pelo id interno |
@@ -105,13 +104,34 @@ Autenticação — deliberadamente deixada de lado pra proteger tempo pra
 correção financeira, concorrência e idempotência. Veja `ARCHITECTURE.md`
 § Autenticação.
 
-Entrega confiável das notificações de saída `WagerProcessed` pra um
-consumidor externo — o publisher do outbox e o consumer de submissão de
-apostas via SQS atualmente compartilham a mesma fila (os dois nomes
-especificados), então uma notificação publicada volta em loop pro
-consumer em vez de chegar a um subscriber de verdade. O consumer checa
-`envelope.type` primeiro, reconhece a mensagem como não sendo uma submissão
-de aposta, loga um único `WARN` e faz o ack imediatamente — sem transação no
-banco, sem redelivery, e nunca é redirecionada pra DLQ. Inofensivo, mas
-ruidoso, e fora de escopo pra esta versão. Veja `ARCHITECTURE.md`
-§ Limitações conhecidas.
+OpenTelemetry, dashboard de métricas e teste de carga ficaram fora do
+timebox. A aplicação emite logs JSON e mantém queries operacionais
+documentadas em `ARCHITECTURE.md`.
+
+## Exemplos HTTP
+
+```bash
+curl -X POST http://localhost:3000/wallets \
+  -H 'Content-Type: application/json' \
+  -d '{"playerId":"player-123","initialBalance":{"amount":"100.00","currency":"BRL"}}'
+```
+
+```bash
+curl -X POST http://localhost:3000/wagering/transactions \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: provider-a:transaction-123' \
+  -d '{
+    "providerId":"provider-a",
+    "externalTransactionId":"transaction-123",
+    "playerId":"player-123",
+    "walletId":"<wallet-id>",
+    "roundId":"round-987",
+    "gameId":"fortune-chimp",
+    "kind":"BET",
+    "money":{"amount":"25.00","currency":"BRL"}
+  }'
+```
+
+Respostas novas usam `201`, replay idempotente usa `200`, referência
+pendente usa `202`, rejeição de negócio usa `422` e conflito de
+idempotência usa `409`.

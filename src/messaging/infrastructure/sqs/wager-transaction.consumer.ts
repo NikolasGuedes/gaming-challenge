@@ -45,8 +45,8 @@ export interface WagerTransactionEnvelope {
     idempotencyKey: string;
     playerId: string;
     walletId: string;
-    roundId?: string;
-    gameId?: string;
+    roundId: string;
+    gameId: string;
     kind: WagerKind;
     money: { amount: string; currency: string };
     referenceExternalTransactionId?: string;
@@ -151,6 +151,9 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
         await useCase.execute({
           externalTransactionId: envelope.data.externalTransactionId,
           providerId: envelope.data.providerId,
+          playerId: envelope.data.playerId,
+          roundId: envelope.data.roundId,
+          gameId: envelope.data.gameId,
           idempotencyKey: envelope.data.idempotencyKey,
           payloadHash: computePayloadHash(envelope.data as unknown as Record<string, unknown>),
           kind: envelope.data.kind,

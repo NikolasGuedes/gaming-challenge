@@ -9,7 +9,10 @@ export interface WalletRepository {
   findByPlayerAndCurrency(playerId: string, currency: string): Promise<Wallet | null>;
   save(wallet: Wallet): Promise<void>;
   appendLedgerEntry(entry: WalletLedgerEntry): Promise<void>;
-  listLedgerEntries(walletId: string, cursor: { after?: string; limit: number }): Promise<WalletLedgerEntry[]>;
+  listLedgerEntries(
+    walletId: string,
+    cursor: { after?: { createdAt: Date; id: string }; limit: number },
+  ): Promise<WalletLedgerEntry[]>;
   /** Recomputes the balance directly in SQL from every ledger row — the reconciliation source of truth. */
   sumLedgerEntries(walletId: string, currency: string): Promise<{ balance: Money; count: number }>;
 }

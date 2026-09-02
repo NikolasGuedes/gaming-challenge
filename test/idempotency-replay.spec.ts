@@ -48,9 +48,11 @@ describe("WageringController — HTTP idempotency", () => {
   const baseDto = {
     externalTransactionId: "http-bet-1",
     providerId: "provider-http",
+    playerId: "player-http-1",
+    roundId: "round-http-1",
+    gameId: "game-http-1",
     kind: "BET" as const,
-    amount: "30.00",
-    currency: "BRL",
+    money: { amount: "30.00", currency: "BRL" },
   };
 
   it("requires the Idempotency-Key header", async () => {
@@ -79,7 +81,7 @@ describe("WageringController — HTTP idempotency", () => {
         ...baseDto,
         walletId,
         externalTransactionId: "http-bet-2",
-        amount: "999.00", // different payload, same key
+        money: { amount: "999.00", currency: "BRL" }, // different payload, same key
       }),
     ).rejects.toThrow(/different payload/);
   });

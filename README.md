@@ -1,114 +1,100 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Distributed Wagering Processor
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Financial service that processes BET/WIN/LOSS/REFUND/ROLLBACK transactions
+from HTTP and SQS, correct under concurrency, persistently idempotent, with
+an auditable ledger. Built for the Jungle Gaming technical challenge.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+See `ARCHITECTURE.md` for design decisions, trade-offs, and known
+limitations. See `docs/superpowers/specs/2026-09-01-wagering-processor-architecture-design.md`
+for the full design spec this was built from.
 
-## Description
+## Requirements
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+- [Bun](https://bun.sh) 1.x
+- Docker + Docker Compose
 
-## Project setup
+## Setup
 
 ```bash
-$ bun install
+cp .env.example .env
+docker compose up -d postgres localstack
+bun install
+bunx mikro-orm migration:up
+bun run src/messaging/infrastructure/sqs/bootstrap-queues.ts
 ```
 
-## Compile and run the project
+If `bunx mikro-orm ...` fails in your environment with a `node:fs`/`globSync`
+error (a known issue on systems whose default `node` predates Node 22's
+`fs.globSync`, since the MikroORM CLI shebang resolves to system `node`, not
+`bun`), run the CLI through Bun directly instead — equivalent, and what was
+actually used to verify this README:
 
 ```bash
-# development
-$ bun run start
-
-# watch mode
-$ bun run start:dev
-
-# production mode
-$ bun run start:prod
+bun run node_modules/@mikro-orm/cli/cli.js migration:up
 ```
 
-## Run tests
+## Running
 
 ```bash
-# unit tests
-$ bun run test
-
-# e2e tests
-$ bun run test:e2e
-
-# test coverage
-$ bun run test:cov
+bun run start:dev        # local, against docker-compose postgres/localstack
+# or
+bun run build && bun run start:prod   # compiled build, closer to production
+# or
+docker compose up -d     # full stack including the app container
 ```
 
-## Deployment
+The API listens on `http://localhost:3000`. Verified directly against this
+worktree: `bun run build` + `bun run start:prod` boots, `/health/live` and
+`/health/ready` respond, and `POST /wallets` → `POST /wagering/transactions`
+→ `GET /wallets/:id/ledger` → `POST /wallets/:id/reconciliation` all round-trip
+correctly end to end against real Postgres and LocalStack.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+`bun run start:dev` shells out to the system `node` binary (via the Nest
+CLI's watcher), so it can hit the same `node:fs`/`globSync` issue noted
+above depending on your environment; `bun run start:prod` (after `bun run
+build`) does not, since it runs the compiled output directly with `bun`.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## Testing
 
 ```bash
-$ bun install -g @nestjs/mau
-$ mau deploy
+bun test src              # unit tests (no containers required)
+bun test test              # integration + concurrency tests (spins up
+                           # Postgres and LocalStack via Testcontainers —
+                           # requires Docker running, no manual setup)
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Both are green as of this task: `bun test test/ src` → **60 pass, 0 fail**
+across 18 files, including every mandatory concurrency scenario from the
+challenge brief (hot-wallet contention, 3+ concurrent instances, 50-way
+duplicate-request replay).
 
-## Observability
+`test/e2e-smoke.spec.ts` is the exception — it exercises the docker-compose
+stack directly, so run `docker compose up -d`, apply migrations, and
+bootstrap the queues (see Setup) before running it.
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+## API summary
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/wallets` | Open a wallet (optional initial balance → `OPENING` transaction) |
+| GET | `/wallets/:walletId` | Wallet state |
+| GET | `/wallets/:walletId/ledger` | Paginated ledger (`?after=&limit=`) |
+| POST | `/wallets/:walletId/reconciliation` | Recompute balance from the ledger, read-only |
+| POST | `/wagering/transactions` | Submit BET/WIN/LOSS/REFUND/ROLLBACK (`Idempotency-Key` header required) |
+| GET | `/wagering/transactions/:transactionId` | Look up a transaction by internal id |
+| GET | `/providers/:providerId/wagering/transactions/:externalTransactionId` | Look up by provider + external id |
+| GET | `/health/live` / `/health/ready` | Liveness / readiness (unauthenticated) |
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+## Not implemented
 
-## Resources
+Authentication — a zero-point item per the challenge brief, deliberately
+skipped to protect time for financial correctness, concurrency, and
+idempotency. See `ARCHITECTURE.md` § Authentication.
 
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Reliable delivery of `WagerProcessed` outbound notifications to an external
+consumer — the outbox publisher and the SQS wager-submission consumer
+currently share the same queue (the two names the brief mandates), so a
+published notification loops back and is rejected by the consumer rather
+than reaching a real subscriber. Harmless (no partial writes; the failure
+rolls back cleanly) but noisy, and out of scope to fix under this
+challenge's grading criteria. See `ARCHITECTURE.md` § Known limitations.

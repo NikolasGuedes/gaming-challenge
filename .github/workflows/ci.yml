@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      NODE_ENV: test
+      PORT: 3000
+      DATABASE_URL: postgres://wagering:wagering@localhost:5432/wagering
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localhost:4566
+      SQS_QUEUE_URL: http://localhost:4566/000000000000/wager-transactions.fifo
+      SQS_DLQ_URL: http://localhost:4566/000000000000/wager-transactions-dlq.fifo
+      SQS_EVENTS_QUEUE_URL: http://localhost:4566/000000000000/wager-events.fifo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Prepare local environment
+        run: cp .env.example .env
+
+      - name: Unit tests
+        run: bun test src
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Build
+        run: bun run build
+
+      - name: Start PostgreSQL and LocalStack
+        run: docker compose up -d --wait postgres localstack
+
+      - name: Apply database migrations
+        run: bun run node_modules/@mikro-orm/cli/cli.js migration:up
+
+      - name: Bootstrap SQS queues
+        run: bun run bootstrap:queues
+
+      - name: Integration and concurrency tests
+        run: bun test test
+
+      - name: Docker diagnostics
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Stop infrastructure
+        if: always()
+        run: docker compose down -v

@@ -1,5 +1,7 @@
 # Distributed Wagering Processor
 
+[![CI](https://github.com/NikolasGuedes/gaming-challenge/actions/workflows/ci.yml/badge.svg)](https://github.com/NikolasGuedes/gaming-challenge/actions/workflows/ci.yml)
+
 Serviço financeiro que processa transações BET/WIN/LOSS/REFUND/ROLLBACK
 vindas de HTTP e SQS, correto sob concorrência, idempotente de forma
 persistente, com ledger auditável.

@@ -10,6 +10,13 @@ export function isExternallySubmittableKind(kind: WagerKind): boolean {
 
 export type WagerStatus = "PENDING" | "PENDING_REFERENCE" | "PROCESSED" | "REJECTED" | "FAILED";
 
+export class InvalidTransactionStateError extends Error {
+  constructor(status: WagerStatus, transition: string) {
+    super(`Cannot ${transition} a transaction in terminal state ${status}`);
+    this.name = "InvalidTransactionStateError";
+  }
+}
+
 const REFUND_ALLOWED_REFERENCE_KINDS: readonly WagerKind[] = ["BET"];
 const ROLLBACK_ALLOWED_REFERENCE_KINDS: readonly WagerKind[] = ["BET", "WIN", "REFUND"];
 
@@ -190,6 +197,7 @@ export class WagerTransaction {
   }
 
   markProcessed(resultBalance: Money, referenceTransactionId: string | null = null): WagerTransaction {
+    this.assertNotTerminal("mark as processed");
     return this.with({
       status: "PROCESSED",
       failureCode: null,
@@ -200,10 +208,17 @@ export class WagerTransaction {
   }
 
   markRejected(failureCode: FailureCode): WagerTransaction {
+    this.assertNotTerminal("mark as rejected");
     return this.with({ status: "REJECTED", failureCode, resultBalance: null, processedAt: new Date() });
   }
 
+  markFailed(): WagerTransaction {
+    this.assertNotTerminal("mark as failed");
+    return this.with({ status: "FAILED", failureCode: null, resultBalance: null, processedAt: new Date() });
+  }
+
   markPendingReference(): WagerTransaction {
+    this.assertNotTerminal("mark as pending reference");
     const now = new Date();
     return this.with({
       status: "PENDING_REFERENCE",
@@ -214,6 +229,7 @@ export class WagerTransaction {
   }
 
   scheduleReferenceRetry(now: Date): WagerTransaction {
+    this.assertNotTerminal("schedule a reference retry");
     const attempts = this.referenceAttempts + 1;
     const delayMs = Math.min(2 ** attempts, 30) * 1_000;
     return this.with({ referenceAttempts: attempts, nextReferenceAttemptAt: new Date(now.getTime() + delayMs) });
@@ -221,5 +237,15 @@ export class WagerTransaction {
 
   hasExhaustedReferenceRetries(now: Date, maxAttempts = 5): boolean {
     return this.referenceAttempts + 1 >= maxAttempts || (this.referenceExpiresAt !== null && this.referenceExpiresAt <= now);
+  }
+
+  isTerminal(): boolean {
+    return this.status === "PROCESSED" || this.status === "REJECTED" || this.status === "FAILED";
+  }
+
+  private assertNotTerminal(transition: string): void {
+    if (this.isTerminal()) {
+      throw new InvalidTransactionStateError(this.status, transition);
+    }
   }
 }

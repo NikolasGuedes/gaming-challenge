@@ -34,8 +34,10 @@ describe("MikroOrmWalletRepository — FOR UPDATE lock", () => {
     // for the opening transaction directly so the FK is satisfiable in this narrow test.
     await setupEm.getConnection().execute(
       `insert into wager_transactions
-        (id, wallet_id, external_transaction_id, provider_id, idempotency_key, payload_hash, kind, amount, currency, status)
-       values (?, ?, 'opening', 'internal', ?, 'n/a', 'OPENING', 100.00, 'BRL', 'PROCESSED')`,
+        (id, wallet_id, player_id, round_id, game_id, external_transaction_id,
+         provider_id, idempotency_key, payload_hash, kind, amount, currency, status)
+       values (?, ?, 'player-1', 'internal-opening', 'internal-opening', 'opening',
+         'internal', ?, 'n/a', 'OPENING', 100.00, 'BRL', 'PROCESSED')`,
       ["22222222-2222-2222-2222-222222222222", wallet.id, `opening-${wallet.id}`],
     );
 

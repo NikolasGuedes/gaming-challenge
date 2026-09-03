@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { EntityManager } from "@mikro-orm/postgresql";
+import { ConflictException } from "@nestjs/common";
 import { Money } from "../src/shared-kernel/money.js";
 import { FailureCode } from "../src/shared-kernel/failure-code.js";
 import { CreateWalletUseCase } from "../src/wallet/application/use-cases/create-wallet.use-case.js";
@@ -286,6 +287,42 @@ describe("ProcessWagerUseCase", () => {
     const verifyEm = db.orm.em.fork();
     const wallet = await new MikroOrmWalletRepository(verifyEm).findById(walletId);
     expect(wallet?.balance.toString()).toBe("70.00"); // debited exactly once
+  });
+
+  it("rejects an idempotency key reused with a different payload in the shared use case", async () => {
+    const walletId = await seedWallet(db, "player-idempotency-conflict", "100.00");
+    const useCase = () => buildProcessWagerUseCase(db.orm.em.fork({ useContext: true }));
+    await useCase().execute({
+      externalTransactionId: "bet-idem-original",
+      providerId: "provider-a",
+      idempotencyKey: "idem-shared-conflict",
+      payloadHash: "hash-original",
+      kind: "BET",
+      walletId,
+      amount: Money.from({ amount: "25.00", currency: "BRL" }),
+      referenceExternalTransactionId: null,
+    });
+
+    try {
+      await useCase().execute({
+        externalTransactionId: "bet-idem-conflicting-payload",
+        providerId: "provider-a",
+        idempotencyKey: "idem-shared-conflict",
+        payloadHash: "hash-different",
+        kind: "BET",
+        walletId,
+        amount: Money.from({ amount: "50.00", currency: "BRL" }),
+        referenceExternalTransactionId: null,
+      });
+      throw new Error("expected idempotency conflict");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toMatchObject({
+        failureCode: FailureCode.IDEMPOTENCY_KEY_CONFLICT,
+      });
+    }
+
+    expect((await new MikroOrmWalletRepository(db.orm.em.fork()).findById(walletId))?.balance.toString()).toBe("75.00");
   });
 
   it("a REFUND arriving before its BET is PENDING_REFERENCE, then resolves when the BET arrives", async () => {

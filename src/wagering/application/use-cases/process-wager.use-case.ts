@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { EntityManager, UniqueConstraintViolationException } from "@mikro-orm/postgresql";
 import { Money } from "../../../shared-kernel/money.js";
 import { FailureCode } from "../../../shared-kernel/failure-code.js";
@@ -111,12 +111,16 @@ export class ProcessWagerUseCase {
         // Another concurrent request for the same (providerId, externalTransactionId) won the
         // race and committed first — this is the expected outcome of "same bet sent N times in
         // parallel": exactly one debit, everyone else replays. Re-read the now-committed row.
+        const winnerByKey = await this.wagerTransactionRepository.findByIdempotencyKey(input.idempotencyKey);
+        if (winnerByKey) {
+          return this.replayOrThrowConflict(winnerByKey, input);
+        }
         const winner = await this.wagerTransactionRepository.findByProviderAndExternalId(
           input.providerId,
           input.externalTransactionId,
         );
         if (winner) {
-          return this.toResult(winner, true);
+          return this.replayOrThrowConflict(winner, input);
         }
       }
       throw err;
@@ -218,12 +222,20 @@ export class ProcessWagerUseCase {
       return this.rejectNew(input, FailureCode.INVALID_KIND);
     }
 
+    // This check belongs in the shared use case, not only in the HTTP response cache: SQS
+    // commands must obey the exact same idempotency contract. The database unique constraint
+    // closes the concurrent-insert race; execute() resolves its loser through the same helper.
+    const existingByKey = await this.wagerTransactionRepository.findByIdempotencyKey(input.idempotencyKey);
+    if (existingByKey) {
+      return this.replayOrThrowConflict(existingByKey, input);
+    }
+
     const existing = await this.wagerTransactionRepository.findByProviderAndExternalId(
       input.providerId,
       input.externalTransactionId,
     );
     if (existing) {
-      return this.toResult(existing, true);
+      return this.replayOrThrowConflict(existing, input);
     }
 
     // The wallet row is the unit of concurrency. Lock it before inspecting reversal state so
@@ -510,5 +522,17 @@ export class ProcessWagerUseCase {
       return { status: "PENDING_REFERENCE", transactionId: tx.id, idempotentReplay };
     }
     return { status: "REJECTED", transactionId: tx.id, failureCode: tx.failureCode!, idempotentReplay };
+  }
+
+  private replayOrThrowConflict(tx: WagerTransaction, input: ProcessWagerInput): ProcessWagerResult {
+    if (tx.payloadHash !== input.payloadHash) {
+      throw new ConflictException({
+        statusCode: 409,
+        error: "Conflict",
+        failureCode: FailureCode.IDEMPOTENCY_KEY_CONFLICT,
+        message: `Idempotency-Key ${input.idempotencyKey} was already used with a different payload`,
+      });
+    }
+    return this.toResult(tx, true);
   }
 }

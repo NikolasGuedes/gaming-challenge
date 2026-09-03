@@ -112,16 +112,9 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Defensive shape check: this queue is also the target of the outbox
-    // publisher's `WagerProcessed` domain events (see ARCHITECTURE.md's
-    // Known limitations — the two are not meant to share a queue, but the
-    // brief only names one). Today those events happen to have an
-    // incompatible shape (`eventType`/`payload`, not `type`/`data`), so
-    // they'd already fail below and redrive to the DLQ — but only by
-    // coincidence, not because anything actually validates the envelope.
-    // Reject anything that isn't an actual wager-submission request before
-    // touching `envelope.data`, so a future event whose payload happens to
-    // resemble a wager submission is never mistaken for one.
+    // Reject anything that is not a wager-submission command before touching
+    // `envelope.data`. Events are published to a separate queue, but validation
+    // here still protects the financial consumer from accidental misrouting.
     if (envelope?.type !== WAGER_TRANSACTION_REQUESTED_TYPE) {
       await this.skipAck(
         message,
@@ -155,7 +148,17 @@ export class WagerTransactionConsumer implements OnModuleInit, OnModuleDestroy {
           roundId: envelope.data.roundId,
           gameId: envelope.data.gameId,
           idempotencyKey: envelope.data.idempotencyKey,
-          payloadHash: computePayloadHash(envelope.data as unknown as Record<string, unknown>),
+          payloadHash: computePayloadHash({
+            externalTransactionId: envelope.data.externalTransactionId,
+            providerId: envelope.data.providerId,
+            walletId: envelope.data.walletId,
+            playerId: envelope.data.playerId,
+            roundId: envelope.data.roundId,
+            gameId: envelope.data.gameId,
+            kind: envelope.data.kind,
+            money: envelope.data.money,
+            referenceExternalTransactionId: envelope.data.referenceExternalTransactionId ?? null,
+          }),
           kind: envelope.data.kind,
           walletId: envelope.data.walletId,
           amount: Money.from(envelope.data.money),

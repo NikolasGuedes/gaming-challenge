@@ -20,7 +20,7 @@ export class IdempotencyService {
   /**
    * Fast-path HTTP replay cache. Even if this were skipped entirely, replaying
    * the same (providerId, externalTransactionId) still resolves correctly
-   * through ProcessWagerUseCase's own domain-level uniqueness check — this
+   * through ProcessWagerUseCase's idempotency-key and domain-level uniqueness checks — this
    * service exists to return the *exact original response bytes* without
    * re-running any logic, and to reject a reused key sent with a different
    * payload.

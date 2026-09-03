@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Money } from "../../shared-kernel/money.js";
 import { FailureCode } from "../../shared-kernel/failure-code.js";
 import {
+  InvalidTransactionStateError,
   isExternallySubmittableKind,
   validateReferenceKind,
   WagerTransaction,
@@ -81,5 +82,22 @@ describe("WagerTransaction", () => {
     });
     const pending = tx.markPendingReference();
     expect(pending.status).toBe("PENDING_REFERENCE");
+  });
+
+  it("treats PROCESSED, REJECTED and FAILED as terminal states", () => {
+    const balance = Money.from({ amount: "20.00", currency: "BRL" });
+    const terminal = [
+      WagerTransaction.create(baseInput).markProcessed(balance),
+      WagerTransaction.create(baseInput).markRejected(FailureCode.INSUFFICIENT_FUNDS),
+      WagerTransaction.create(baseInput).markFailed(),
+    ];
+
+    for (const tx of terminal) {
+      expect(tx.isTerminal()).toBe(true);
+      expect(() => tx.markProcessed(balance)).toThrow(InvalidTransactionStateError);
+      expect(() => tx.markRejected(FailureCode.INVALID_KIND)).toThrow(InvalidTransactionStateError);
+      expect(() => tx.markFailed()).toThrow(InvalidTransactionStateError);
+      expect(() => tx.markPendingReference()).toThrow(InvalidTransactionStateError);
+    }
   });
 });

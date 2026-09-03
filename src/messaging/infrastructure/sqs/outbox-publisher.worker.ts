@@ -10,7 +10,7 @@ const BATCH_SIZE = 10;
 @Injectable()
 export class OutboxPublisherWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OutboxPublisherWorker.name);
-  private readonly queueUrl = process.env.SQS_EVENTS_QUEUE_URL ?? process.env.SQS_QUEUE_URL ?? "";
+  private readonly queueUrl = process.env.SQS_EVENTS_QUEUE_URL ?? "";
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
 

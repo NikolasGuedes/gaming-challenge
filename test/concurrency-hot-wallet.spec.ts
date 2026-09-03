@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { Money } from "../src/shared-kernel/money.js";
+import { ConflictException } from "@nestjs/common";
 import { FailureCode } from "../src/shared-kernel/failure-code.js";
 import { CreateWalletUseCase } from "../src/wallet/application/use-cases/create-wallet.use-case.js";
 import { MikroOrmWalletRepository } from "../src/wallet/infrastructure/persistence/repositories/wallet.repository.js";
@@ -144,4 +145,36 @@ describe("Concurrency — hot wallet, multi-instance, mass duplication", () => {
     const wallet = await new MikroOrmWalletRepository(verifyEm).findById(walletId);
     expect(wallet?.balance.toString()).toBe("975.00"); // debited exactly once
   }, 30_000);
+
+  it("concurrent requests reusing one idempotency key with different payloads apply exactly one debit", async () => {
+    const walletId = await seedWallet("player-idem-race", "100.00");
+    const request = (suffix: string, amount: string): ProcessWagerInput => ({
+      externalTransactionId: `idem-race-${suffix}`,
+      providerId: "provider-idem-race",
+      idempotencyKey: "idem-race-shared-key",
+      payloadHash: `hash-${suffix}`,
+      kind: "BET",
+      walletId,
+      amount: Money.from({ amount, currency: "BRL" }),
+      referenceExternalTransactionId: null,
+    });
+
+    const results = await Promise.allSettled([
+      freshUseCase().execute(request("a", "25.00")),
+      freshUseCase().execute(request("b", "50.00")),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected");
+    expect(rejected?.status).toBe("rejected");
+    if (rejected?.status === "rejected") {
+      expect(rejected.reason).toBeInstanceOf(ConflictException);
+    }
+
+    const repository = new MikroOrmWalletRepository(db.orm.em.fork());
+    const wallet = await repository.findById(walletId);
+    expect(wallet).not.toBeNull();
+    expect(["50.00", "75.00"]).toContain(wallet!.balance.toString());
+    const ledger = await repository.listLedgerEntries(walletId, { limit: 100 });
+    expect(ledger.filter((entry) => entry.direction === "DEBIT")).toHaveLength(1);
+  }, 20_000);
 });

@@ -152,6 +152,12 @@ Duas camadas, ambas persistentes (nunca em memória):
   `(consumer_name, message_id)`. Checada dentro da mesma transação do
   débito/crédito que ela guarda.
 
+O `ProcessWagerUseCase`, compartilhado por HTTP e SQS, também consulta a
+`idempotency_key` persistida na própria `wager_transactions`: hash igual
+reproduz o resultado e hash diferente gera `409 / IDEMPOTENCY_KEY_CONFLICT`.
+Assim a regra não depende do cache HTTP. Os dois adapters calculam o hash
+canônico sobre exatamente os mesmos campos de negócio.
+
 Por baixo das duas, `wager_transactions` tem sua própria
 `UNIQUE (provider_id, external_transaction_id)` — a fonte de verdade real
 pra "essa aposta já foi processada", independente de qual canal (HTTP ou
